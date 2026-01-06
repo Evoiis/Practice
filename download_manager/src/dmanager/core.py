@@ -16,12 +16,12 @@ import aiofiles
 
 @dataclass
 class DownloadEvent:
-    time: datetime
     task_id: int
     state: DownloadState
-    error_string: Optional[str]
-    percent_completed: float    # TODO: Logic
-    download_speed: float   # TODO: Logic
+    # percent_completed: float    # TODO: Logic
+    # download_speed: float   # TODO: Logic
+    error_string: Optional[str] = ""
+    time: datetime = datetime.now()
 
 class DownloadState(Enum):
     PAUSED = 0
@@ -34,13 +34,13 @@ class DownloadMetadata:
     task_id: int
     url: str
     output_file: str
-    etag: str
-    time_added: datetime    # TODO: Logic
-    time_completed: datetime # TODO: Logic
-    active_time: timedelta # TODO: Logic
-    percent_completed: float = 0    # TODO: Logic
-    average_speed: float = 0 # MB/s    # TODO: Logic
-    completed: bool = False # TODO: Logic
+    # time_added: datetime    # TODO
+    # time_completed: datetime # TODO
+    # active_time: timedelta # TODO
+    # etag: str = None
+    # percent_completed: float = 0    # TODO
+    # average_speed: float = 0 # MB/s    # TODO
+    # completed: bool = False # TODO
     state: DownloadState = DownloadState.PAUSED
     server_supports_http_range: bool = False
 
@@ -55,6 +55,7 @@ class DownloadManager:
         :param chunk_write_size: How large of a chunk should the program write each time in MB
         :type chunk_write_size: int
         """
+
         # TODO Add clean up self._downloads logic
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
@@ -67,9 +68,9 @@ class DownloadManager:
         self._next_id += 1
         return self._next_id
 
-    def add_and_start_download(self, url: str, output_file: Optional[str] = "") -> int:
+    async def add_and_start_download(self, url: str, output_file: Optional[str] = "") -> int:
         id = self.add_download(url, output_file)
-        self.start_download(id)
+        await self.start_download(id)
         return id
 
     def add_download(self, url: str, output_file: Optional[str] = "") -> int:
@@ -127,34 +128,33 @@ class DownloadManager:
 
         # Actually download the file --------------------------------------------------------------------
         headers = {}
-        if download.server_supports_range:
+        if download.server_supports_http_range:
             headers["Range"] = f"bytes={output_file_size}-"
 
-        session = aiohttp.ClientSession()
         try:
             download.state = DownloadState.RUNNING
             await self.events_queue.put(DownloadEvent(
                 task_id=download.task_id,
                 state=download.state
             ))
-
-            async with session.get(download.url, headers=headers) as resp:
-                async for chunk in resp.content.iter_chunked(self.chunk_write_size * 1024 * 1024):
-                    try:
-                        mode = "ab"
-                        if resp.status == 200:
-                            # TODO: Still need this?
-                            mode = "wb"
-                        async with aiofiles.open(download.output_file, mode) as f:
-                            await f.write(chunk)
-                    except Exception as err:
-                        download.state = DownloadState.ERROR
-                        await self.events_queue.put(DownloadEvent(
-                            task_id=download.task_id,
-                            state= download.state,
-                            error_string=str(err)
-                        ))
-                    # TODO: Update speed
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download.url, headers=headers) as resp:
+                    async for chunk in resp.content.iter_chunked(self.chunk_write_size * 1024 * 1024):
+                        try:
+                            mode = "ab"
+                            if resp.status == 200:
+                                # TODO: Still need this?
+                                mode = "wb"
+                            async with aiofiles.open(download.output_file, mode) as f:
+                                await f.write(chunk)
+                        except Exception as err:
+                            download.state = DownloadState.ERROR
+                            await self.events_queue.put(DownloadEvent(
+                                task_id=download.task_id,
+                                state= download.state,
+                                error_string=str(err)
+                            ))
+                        # TODO: Update speed
 
             download.state = DownloadState.COMPLETED
             await self.events_queue.put(DownloadEvent(
@@ -208,7 +208,7 @@ class DownloadManager:
     
     async def cancel_download(self, task_id: int, remove_file: bool = False) -> bool:
         if task_id not in self._downloads:
-            logging.warning(f"DM.cancel_download called with task_id not found in DM._downloads")
+            logging.warning(f"Download Manager cancel_download called with invalid task_id")
             return False
 
         if self._downloads[task_id].state == DownloadState.RUNNING:
