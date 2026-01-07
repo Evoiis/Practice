@@ -5,11 +5,12 @@ import logging
 
 
 class MockResponse:
-    def __init__(self, chunks, status=200, headers=None):
+    def __init__(self, chunks, status=200, headers=None, chunk_iter_wait=0.5):
         self._chunks = chunks
         self.status = status
         self.headers = headers or {}
         self.content = self
+        self.chunk_iter_wait = chunk_iter_wait
 
     async def __aenter__(self):
         return self
@@ -18,8 +19,9 @@ class MockResponse:
         return False
 
     async def iter_chunked(self, n):
+        # TODO: Use queue instead of sleep for more concrete control
         for c in self._chunks:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(self.chunk_iter_wait)
             yield c
 
 
@@ -41,7 +43,7 @@ class MockSession:
 
 
 @pytest.mark.asyncio
-async def test_dm_add_and_start_download(monkeypatch, async_thread_runner):
+async def test_add_and_start_download(monkeypatch, async_thread_runner):
     from dmanager.core import DownloadManager, DownloadState
 
     # Prepare mock session
@@ -105,4 +107,120 @@ async def test_dm_add_and_start_download(monkeypatch, async_thread_runner):
 
     if os.path.exists(mock_file_name):
         os.remove(mock_file_name)
+
+
+def test_add_download():
+    pass
+
+@pytest.mark.asyncio
+async def test_pause_download(monkeypatch, async_thread_runner):
+    # Set up mocks with slow task
+    MockResponse(
+        chunks=[b"abc", b"def", b"ghi"], 
+        status=206, 
+        headers={
+            "Content-Length": "9",
+            "Accept-Ranges": "bytes"
+        },
+        chunk_iter_wait=2.0
+    )
+
+    # Add and start download
+
+    # Call pause
+
+    # Check task is paused
+    pass
+
+# TODO: Test dmanager._tasks is cleaned up properly
+
+@pytest.mark.asyncio
+async def test_resume_download(monkeypatch, async_thread_runner):
+
+    # Set up mocks
+
+    # 
+
+    pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_header_etag_change(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_header_file_size_change(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_size_change(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_no_http_range_support(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_no_output_file_input(monkeypatch, async_thread_runner):
+    pass
+
+# NEGATIVE TESTS --------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_output_file_with_invalid_characters(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_invalid_test_id(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_start_running_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_resume_running_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_cancel_completed_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_start_completed_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_pause_completed_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_cancel_paused_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_start_paused_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_pause_paused_download(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_input_invalid_url(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_input_already_used_output_file(monkeypatch, async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_resume_on_download_with_no_http_range_support(monkeypatch, async_thread_runner):
+    pass
+
+
 
