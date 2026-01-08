@@ -28,7 +28,7 @@ class DownloadState(Enum):
     RUNNING = 1
     COMPLETED = 2
     PENDING = 3
-    ERROR = -1
+    ERROR = -1  # TODO: Restart from error state
 
 @dataclass
 class DownloadMetadata:
@@ -120,7 +120,65 @@ class DownloadManager:
         self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id], resume=True))
 
         return True
+
+    async def pause_download(self, task_id: int) -> bool:
+        """
+        Pauses a download if it is running
+        Removes task from _tasks
+
+        :param task_id: Identifies which task to pause
+        """
+        if task_id not in self._downloads:
+            return False
+        
+        download = self._downloads[task_id]
+        if download.state != DownloadState.RUNNING:
+            return False
+
+        if task_id not in self._tasks:
+            raise Exception("Error: task_id not in DownloadManager task list")
+        task = self._tasks[task_id]
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        
+        if task_id in self._tasks:
+            del self._tasks[task_id]
+        download.state = DownloadState.PAUSED
+        await self.events_queue.put(
+            DownloadEvent(
+                task_id=download.id,
+                state=download.state
+            )
+        )
+        return True
     
+    async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
+        """
+        Removes download from _downloads and pauses the download if it is currently running
+
+        :param remove_file: Whether or not to delete the output file
+        """
+        if task_id not in self._downloads:
+            logging.warning(f"Download Manager delete_download called with invalid task_id")
+            return False
+
+        if self._downloads[task_id].state == DownloadState.RUNNING:
+            if not await self.pause_download(task_id):
+                raise Exception("Error: pause_download failed in delete_download")
+        
+        if task_id in self._tasks:
+            del self._tasks[task_id]
+        
+        if remove_file:
+            os.remove(self._downloads[task_id].output_file)
+        del self._downloads[task_id]
+
+        return True
+
     async def _check_download_headers(self, download: DownloadMetadata, resume: bool=False) -> bool:
         """
         Parses headers from server
@@ -255,62 +313,5 @@ class DownloadManager:
                 error_string=str(err)
             ))
 
-    async def pause_download(self, task_id: int) -> bool:
-        """
-        Pauses a download if it is running
-        Removes task from _tasks
-
-        :param task_id: Identifies which task to pause
-        """
-        if task_id not in self._downloads:
-            return False
-        
-        download = self._downloads[task_id]
-        if download.state != DownloadState.RUNNING:
-            return False
-
-        if task_id not in self._tasks:
-            raise Exception("Error: task_id not in DownloadManager task list")
-        task = self._tasks[task_id]
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-        download.state = DownloadState.PAUSED
-        await self.events_queue.put(
-            DownloadEvent(
-                task_id=download.id,
-                state=download.state
-            )
-        )
-        return True
-    
-    async def cancel_download(self, task_id: int, remove_file: bool = False) -> bool:
-        """
-        Removes download from _downloads and pauses the download if it is currently running
-
-        :param remove_file: Whether or not to delete the output file
-        """
-        if task_id not in self._downloads:
-            logging.warning(f"Download Manager cancel_download called with invalid task_id")
-            return False
-
-        if self._downloads[task_id].state == DownloadState.RUNNING:
-            if not await self.pause_download(task_id):
-                raise Exception("Error: pause_download failed in cancel_download")
-        
-        if task_id in self._tasks:
-            del self._tasks[task_id]
-        
-        if remove_file:
-            os.remove(self._downloads[task_id].output_file)
-        del self._downloads[task_id]
-
-        return True
 
 __all__ = ["DownloadManager", "DownloadMetadata", "DownloadState", "DownloadEvent"]

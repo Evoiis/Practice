@@ -193,7 +193,23 @@ async def test_resume_download(async_thread_runner, create_mock_response_and_set
 
 
 @pytest.mark.asyncio
-async def test_cancel_download(async_thread_runner):
+async def test_delete_from_running_state(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_delete_from_paused_state(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_delete_from_error_state(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_delete_from_completed_state(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_delete_from_pending_state(async_thread_runner):
     pass
 
 @pytest.mark.asyncio
@@ -201,6 +217,13 @@ async def test_download_with_no_http_range_support():
     pass
 
 
+@pytest.mark.asyncio
+async def test_resume_in_error_state(async_thread_runner):
+    pass
+
+@pytest.mark.asyncio
+async def test_start_from_error_state(async_thread_runner):
+    pass
 
 # TODO: Error path tests
 # Chunk write Failure
@@ -208,20 +231,3 @@ async def test_download_with_no_http_range_support():
 # Asyncio/Aiohttp errors
     # Network disconnect
     # Server Errors 500
-
-# TODO: Concurrency tests
-"""
-Put tests like:
-
-Tests asserting event ordering
-
-Tests asserting _tasks cleanup
-
-Pause/resume timing correctness
-
-Partial-write verification
-
-Race-condition-related tests
-"""
-
-

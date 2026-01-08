@@ -17,4 +17,6 @@ async def test_resume_on_header_content_length_change(monkeypatch, async_thread_
 async def test_no_http_range_support(monkeypatch, async_thread_runner):
     pass
 
-
+@pytest.mark.asyncio
+async def test_resume_on_download_with_no_http_range_support(async_thread_runner):
+    pass
