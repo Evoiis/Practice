@@ -1,6 +1,7 @@
 import asyncio
 import time
 import os
+import logging
 
 DEFAULT_TIMEOUT = 20
 
@@ -10,6 +11,8 @@ async def wait_for_state(dm, task_id, expected_state, timeout_sec=DEFAULT_TIMEOU
     """
     for _ in range(timeout_sec):
         event = await dm.get_oldest_event()
+        if event:
+            logging.debug(f"Event received: {event}")
         if event and event.task_id == task_id and event.state == expected_state:
             return event
 

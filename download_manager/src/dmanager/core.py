@@ -97,8 +97,8 @@ class DownloadManager:
         if task_id not in self._downloads:
             return False
 
-        if self._downloads[task_id].state == DownloadState.RUNNING:
-            logging.warning(f"Received request to start, {task_id=}, but task is already running!")
+        if self._downloads[task_id].state != DownloadState.PENDING:
+            logging.warning(f"Received request to start, {task_id=}, but task is not pending!")
             return False
 
         self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id]))
@@ -115,7 +115,7 @@ class DownloadManager:
 
         download = self._downloads[task_id]
 
-        if download.state == DownloadState.RUNNING or download.state == DownloadState.PENDING:
+        if download.state != DownloadState.PAUSED:
             return False
         
         self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id], resume=True))
@@ -297,12 +297,12 @@ class DownloadManager:
 
             del self._tasks[download.task_id]
         except asyncio.CancelledError:
-            # TODO: Should remove task from self._tasks?
             download.state = DownloadState.PAUSED
             await self.events_queue.put(DownloadEvent(
                 task_id=download.task_id,
                 state= download.state
             ))
+            raise asyncio.CancelledError()
         except Exception as err:
             # TODO: Should remove task from self._tasks?
             download.state = DownloadState.ERROR
