@@ -15,7 +15,7 @@ async def test_invalid_test_id(async_thread_runner):
     pass
 
 @pytest.mark.asyncio
-async def test_no_output_file_input(monkeypatch, async_thread_runner):
+async def test_empty_output_file_name(monkeypatch, async_thread_runner):
     pass
 
 @pytest.mark.asyncio
