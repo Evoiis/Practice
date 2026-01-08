@@ -4,20 +4,22 @@ import os
 import logging
 
 @pytest.mark.asyncio
-async def test_add_and_start_download(async_thread_runner, mock_response, mock_session):
+async def test_add_and_start_download(async_thread_runner, create_mock_response_and_set_mock_session):
     from dmanager.core import DownloadManager, DownloadState
 
-    # Prepare mock session
+    # Prepare mock session and response
     chunks = [b"abc", b"def", b"ghi"]
-    mock_url = "https://example.com/file.bin"
     mock_file_name = "file.bin"
-    mock_res = mock_response(
-        status=206,
-        headers={
+    mock_url = "https://example.com/file.bin"
+    
+    mock_res = create_mock_response_and_set_mock_session(
+        206,
+        {
             "Content-Length": str(sum(len(c) for c in chunks)),
             "Accept-Ranges": "bytes"
-        })
-    mock_session = mock_session(mock_url, mock_res)
+        },
+        mock_url
+    )    
 
     logging.debug("Add and start download")
     dm = DownloadManager()
@@ -115,6 +117,7 @@ async def test_cancel_download(monkeypatch, async_thread_runner):
 # Chunk write Failure
 # Asyncio/Aiohttp errors
     # Network disconnect
+    # Server Errors 500
 
 # TODO: Concurrency tests
 """

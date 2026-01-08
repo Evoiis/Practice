@@ -56,16 +56,27 @@ def async_thread_runner():
     runner.shutdown()
 
 @pytest.fixture
-def mock_response():
+def create_mock_response():
     def factory(status, headers=None):
         return MockResponse(status, headers)
 
     return factory
 
 @pytest.fixture
-def mock_session(monkeypatch):
+def set_mock_session(monkeypatch):
     def factory(mock_url, mock_response):
         monkeypatch.setattr("aiohttp.ClientSession", lambda: MockSession({mock_url: mock_response}))
     
     return factory
-    
+
+@pytest.fixture
+def create_mock_response_and_set_mock_session(monkeypatch):
+
+    def factory(return_status, headers, mock_url):
+        mock_res = MockResponse(return_status, headers)
+        monkeypatch.setattr("aiohttp.ClientSession", lambda: MockSession({mock_url: mock_res}))
+        return mock_res
+
+    return factory
+
+        
