@@ -118,9 +118,8 @@ async def test_resume_on_header_content_length_change(async_thread_runner, test_
 
     dm.shutdown()
 
-
 @pytest.mark.asyncio
-async def test_no_http_range_support(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
+async def test_download_with_no_http_range_support(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
     mock_url = "https://example.com/file.bin"
     mock_file_name = "test_file.bin"
     test_file_setup_and_cleanup(mock_file_name)

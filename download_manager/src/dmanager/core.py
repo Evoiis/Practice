@@ -29,14 +29,14 @@ class DownloadState(Enum):
     COMPLETED = 2
     PENDING = 3
     DELETED = 4
-    ERROR = -1  # TODO: Restart from error state
+    ERROR = -1
 
 @dataclass
 class DownloadMetadata:
     task_id: int
     url: str
     output_file: str
-    etag: str = None # TODO
+    etag: str = None
     # average_speed: float = 0 # MB/s    # TODO
     downloaded_bytes: int = 0
     file_size_bytes: int = None
@@ -120,8 +120,10 @@ class DownloadManager:
 
         download = self._downloads[task_id]
 
-        if download.state != DownloadState.PAUSED:
+        if download.state not in [DownloadState.PAUSED, DownloadState.ERROR]:
             return False
+        if os.path.exists(download.output_file):
+            os.remove(download.output_file)
         
         self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id], resume=True))
 
@@ -276,12 +278,12 @@ class DownloadManager:
         if download.server_supports_http_range:
             headers["Range"] = f"bytes={download.downloaded_bytes}-"
 
+        download.state = DownloadState.RUNNING
+        await self.events_queue.put(DownloadEvent(
+            task_id=download.task_id,
+            state=download.state
+        ))
         try:
-            download.state = DownloadState.RUNNING
-            await self.events_queue.put(DownloadEvent(
-                task_id=download.task_id,
-                state=download.state
-            ))
             async with aiohttp.ClientSession() as session:
                 async with session.get(download.url, headers=headers) as resp:
                     async for chunk in resp.content.iter_chunked(self.chunk_write_size * 1024 * 1024):
