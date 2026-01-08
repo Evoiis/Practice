@@ -28,6 +28,7 @@ class DownloadState(Enum):
     RUNNING = 1
     COMPLETED = 2
     PENDING = 3
+    DELETED = 4
     ERROR = -1  # TODO: Restart from error state
 
 @dataclass
@@ -150,12 +151,12 @@ class DownloadManager:
         download.state = DownloadState.PAUSED
         await self.events_queue.put(
             DownloadEvent(
-                task_id=download.id,
+                task_id=download.task_id,
                 state=download.state
             )
         )
         return True
-    
+
     async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
         """
         Removes download from _downloads and pauses the download if it is currently running
@@ -176,6 +177,13 @@ class DownloadManager:
         if remove_file:
             os.remove(self._downloads[task_id].output_file)
         del self._downloads[task_id]
+
+        await self.events_queue.put(
+            DownloadEvent(
+                task_id=task_id,
+                state=DownloadState.DELETED
+            )
+        )
 
         return True
 
@@ -272,22 +280,13 @@ class DownloadManager:
             async with aiohttp.ClientSession() as session:
                 async with session.get(download.url, headers=headers) as resp:
                     async for chunk in resp.content.iter_chunked(self.chunk_write_size * 1024 * 1024):
-                        try:
-                            mode = "ab"
-                            if resp.status == 200:
-                                mode = "wb"
-                            async with aiofiles.open(download.output_file, mode) as f:
-                                await f.write(chunk)
-                                download.downloaded_bytes += len(chunk)
-                        except Exception as err:
-                            # TODO: Make sure this is handled properly
-                            download.state = DownloadState.ERROR
-                            await self.events_queue.put(DownloadEvent(
-                                task_id=download.task_id,
-                                state= download.state,
-                                error_string=str(err)
-                            ))
-                            break
+                        mode = "ab"
+                        if resp.status == 200:
+                            mode = "wb"
+                        async with aiofiles.open(download.output_file, mode) as f:
+                            await f.write(chunk)
+                            download.downloaded_bytes += len(chunk)
+                            
                         # TODO: Update speed
 
             download.state = DownloadState.COMPLETED

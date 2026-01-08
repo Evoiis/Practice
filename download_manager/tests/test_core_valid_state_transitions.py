@@ -4,7 +4,7 @@ import os
 import logging
 
 from dmanager.core import DownloadManager, DownloadState
-from tests.helpers import wait_for_state, verify_file
+from tests.helpers import wait_for_state, verify_file, wait_for_file_to_be_created
 
 @pytest.mark.asyncio
 async def test_add_and_start_download(async_thread_runner, create_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
@@ -29,8 +29,6 @@ async def test_add_and_start_download(async_thread_runner, create_mock_response_
     dm = DownloadManager()
     task_id = dm.add_download(mock_url, mock_file_name)
     async_thread_runner.submit(dm.start_download(task_id))
-
-    logging.debug(f"{task_id=}")
 
     received_running_event = False
 
@@ -97,12 +95,8 @@ async def test_pause_download(async_thread_runner, create_mock_response_and_set_
     logging.debug("Give dm a chunk to write")
     await mock_response.insert_chunk(chunks[0])
 
-    logging.debug("Wait for dm to write the chunk")
-    count = 0
-    while not os.path.exists(mock_file_name):
-        await asyncio.sleep(1)
-        count += 1
-        assert(count < 20, "Timeout exceeded while waiting for file write")
+    logging.debug("Wait for dm to create the file")
+    wait_for_file_to_be_created(mock_file_name)
 
     logging.debug("Pause download")
     async_thread_runner.submit(dm.pause_download(task_id))
@@ -149,12 +143,8 @@ async def test_resume_download(async_thread_runner, create_mock_response_and_set
     logging.debug("Give dm a chunk to write")
     await mock_response.insert_chunk(chunks[0])
 
-    logging.debug("Wait for dm to write the chunk")
-    count = 0
-    while not os.path.exists(mock_file_name):
-        await asyncio.sleep(1)
-        count += 1
-        assert(count < 20, "Timeout exceeded while waiting for file write")
+    logging.debug("Wait for dm to write the chunk")    
+    wait_for_file_to_be_created(mock_file_name)
 
     logging.debug("Pause download")
     async_thread_runner.submit(dm.pause_download(task_id))
@@ -178,7 +168,7 @@ async def test_resume_download(async_thread_runner, create_mock_response_and_set
 
 
 @pytest.mark.asyncio
-async def test_delete_from_pending_state(async_thread_runner):
+async def test_delete_from_pending_state():
     mock_url = "https://example.com/file.bin"
     mock_file_name = "test_file.bin"
     dm = DownloadManager()
@@ -191,8 +181,40 @@ async def test_delete_from_pending_state(async_thread_runner):
     assert task_id not in dm.get_downloads()
 
 @pytest.mark.asyncio
-async def test_delete_from_running_state(async_thread_runner):
-    pass
+async def test_delete_from_running_state(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
+    chunks = [b"abc", b"def", b"ghi"]
+    mock_url = "https://example.com/file.bin"
+    mock_file_name = "test_file.bin"
+    test_file_setup_and_cleanup(mock_file_name)
+
+    mock_response = create_mock_response_and_set_mock_session(
+        206,
+        {
+            "Content-Length": str(sum(len(c) for c in chunks)),
+            "Accept-Ranges": "bytes"
+        },
+        mock_url
+    )
+
+    dm = DownloadManager()
+    task_id = dm.add_download(mock_url, mock_file_name)
+    async_thread_runner.submit(dm.start_download(task_id))
+
+    await mock_response.insert_chunk(chunks[0])
+    await wait_for_state(dm, task_id, DownloadState.RUNNING)
+    wait_for_file_to_be_created(mock_file_name)
+
+    mock_response.end_response()
+
+    logging.debug("Download is running, now run delete_download")
+    future = async_thread_runner.submit(dm.delete_download(task_id, remove_file=False))
+    future.result()
+
+    await wait_for_state(dm, task_id, DownloadState.DELETED)
+
+    assert task_id not in dm.get_downloads()
+    assert task_id not in dm._tasks
+    assert os.path.exists(mock_file_name)
 
 @pytest.mark.asyncio
 async def test_delete_from_paused_state(async_thread_runner):
