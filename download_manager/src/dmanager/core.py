@@ -217,7 +217,6 @@ class DownloadManager:
                         try:
                             mode = "ab"
                             if resp.status == 200:
-                                # TODO: Still need this?
                                 mode = "wb"
                             async with aiofiles.open(download.output_file, mode) as f:
                                 await f.write(chunk)

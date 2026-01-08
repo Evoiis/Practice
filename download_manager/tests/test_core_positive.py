@@ -4,7 +4,7 @@ import os
 import logging
 
 from dmanager.core import DownloadManager, DownloadState
-from tests.helpers import wait_for_state
+from tests.helpers import wait_for_state, verify_file
 
 @pytest.mark.asyncio
 async def test_add_and_start_download(async_thread_runner, create_mock_response_and_set_mock_session):
@@ -68,11 +68,9 @@ async def test_add_and_start_download(async_thread_runner, create_mock_response_
     assert(download_metadata.file_size_bytes == 9)
     assert(download_metadata.downloaded_bytes == 9)
 
-    expected_text = "abcdefghi"
-    with open(mock_file_name) as f:
-        file_text = f.read()
-        assert(file_text == expected_text, f"Downloaded file text did not match expected.\nDownloaded: {file_text}\nExpected: {expected_text}")
+    verify_file(mock_file_name, "abcdefghi")
 
+    logging.debug("Cleanup")
     if os.path.exists(mock_file_name):
         os.remove(mock_file_name)
 
@@ -118,7 +116,7 @@ async def test_pause_download(async_thread_runner, create_mock_response_and_set_
     await wait_for_state(dm, task_id, DownloadState.PAUSED)
 
     # Task should be paused so we will give a chunk and wait some time to make sure pause stops file write
-    await mock_response.insert_chunk(chunks[0])
+    await mock_response.insert_chunk(chunks[1])
     await asyncio.sleep(5)
     
     # Check _tasks is cleaned up and download state
@@ -126,10 +124,7 @@ async def test_pause_download(async_thread_runner, create_mock_response_and_set_
     assert(dm.get_downloads()[task_id].state == DownloadState.PAUSED)
 
     logging.debug("Verifying only the first chunk was written to file")
-    expected_text = "abc"
-    with open(mock_file_name) as f:
-        file_text = f.read()
-        assert(file_text == expected_text, f"Downloaded file text did not match expected.\nDownloaded: {file_text}\nExpected: {expected_text}")
+    verify_file(mock_file_name, "abc")
 
     logging.debug("Cleanup")
     if os.path.exists(mock_file_name):
@@ -137,20 +132,73 @@ async def test_pause_download(async_thread_runner, create_mock_response_and_set_
 
 
 @pytest.mark.asyncio
-async def test_resume_download(monkeypatch, async_thread_runner):
+async def test_resume_download(async_thread_runner, create_mock_response_and_set_mock_session):
+    chunks = [b"abc", b"def", b"ghi"]
+    mock_url = "https://example.com/file.bin"
+    mock_file_name = "test_file.bin"
+    if os.path.exists(mock_file_name):
+        os.remove(mock_file_name)
+    mock_response = create_mock_response_and_set_mock_session(
+        206,
+        {
+            "Content-Length": str(sum(len(c) for c in chunks)),
+            "Accept-Ranges": "bytes"
+        },
+        mock_url
+    )
 
-    # Set up mocks
+    logging.debug("Add and start download")
+    dm = DownloadManager()
+    task_id = dm.add_download(mock_url, mock_file_name)
+    async_thread_runner.submit(dm.start_download(task_id))
 
-    # 
+    logging.debug("Wait for dm to emit download running state")
+    await wait_for_state(dm, task_id, DownloadState.RUNNING)
 
-    pass
+    logging.debug("Give dm a chunk to write")
+    await mock_response.insert_chunk(chunks[0])
+
+    logging.debug("Wait for dm to write the chunk")
+    count = 0
+    while not os.path.exists(mock_file_name):
+        await asyncio.sleep(1)
+        count += 1
+        assert(count < 20, "Timeout exceeded while waiting for file write")
+
+    logging.debug("Pause download")
+    async_thread_runner.submit(dm.pause_download(task_id))
+
+    logging.debug("Wait for dm to emit download pause state")
+    await wait_for_state(dm, task_id, DownloadState.PAUSED)
+
+    # Task should be paused so we will give a chunk and wait some time to make sure pause stops file write
+    await mock_response.insert_chunk(chunks[1])
+    await asyncio.sleep(5)
+
+    logging.debug("Resume Download")
+    async_thread_runner.submit(dm.resume_download(task_id))
+    
+    await wait_for_state(dm, task_id, DownloadState.RUNNING)
+
+    await mock_response.insert_chunk(chunks[2])
+
+    # Verify
+    verify_file(mock_file_name, "abcghi")
+
+
+    # Cleanup
+    logging.debug("Cleanup")
+    if os.path.exists(mock_file_name):
+        os.remove(mock_file_name)
 
 
 @pytest.mark.asyncio
-async def test_cancel_download(monkeypatch, async_thread_runner):
+async def test_cancel_download(async_thread_runner):
     pass
 
-
+@pytest.mark.asyncio
+async def test_download_with_no_http_range_support():
+    pass
 
 
 
