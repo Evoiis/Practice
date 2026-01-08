@@ -3,16 +3,21 @@ import pytest
 import os
 import logging
 
+from dmanager.core import DownloadManager, DownloadState
+from tests.helpers import wait_for_state
+
 @pytest.mark.asyncio
 async def test_add_and_start_download(async_thread_runner, create_mock_response_and_set_mock_session):
-    from dmanager.core import DownloadManager, DownloadState
 
-    # Prepare mock session and response
+    logging.debug("Prepare mock session and response")
     chunks = [b"abc", b"def", b"ghi"]
-    mock_file_name = "file.bin"
     mock_url = "https://example.com/file.bin"
-    
-    mock_res = create_mock_response_and_set_mock_session(
+
+    mock_file_name = "test_file.bin"
+    if os.path.exists(mock_file_name):
+        os.remove(mock_file_name)
+
+    mock_response = create_mock_response_and_set_mock_session(
         206,
         {
             "Content-Length": str(sum(len(c) for c in chunks)),
@@ -31,19 +36,20 @@ async def test_add_and_start_download(async_thread_runner, create_mock_response_
     received_running_event = False
 
     for chunk in chunks:
-        await mock_res.insert_chunk(chunk)
+        await mock_response.insert_chunk(chunk)
     
-    mock_res.end_response()
+    mock_response.end_response()
 
     logging.debug("Consume Events")
     counter = 0
     while True:
         await asyncio.sleep(1)
         counter += 1
-        event = await dm.get_latest_event()
+        event = await dm.get_oldest_event()
         logging.debug(f"{event=}")
 
         if event is None:
+            assert(counter < 20, "Download Manager took too long to respond!")
             continue
 
         if event.state == DownloadState.RUNNING and event.task_id == task_id:
@@ -52,8 +58,6 @@ async def test_add_and_start_download(async_thread_runner, create_mock_response_
         if event.state == DownloadState.COMPLETED and event.task_id == task_id:
             assert(received_running_event, "Expected to receive download running event before completed event")
             break
-
-        assert(counter < 20, "Download Manager took too long to respond!")
     
     download_metadata = dm.get_downloads()[1]
 
@@ -74,26 +78,63 @@ async def test_add_and_start_download(async_thread_runner, create_mock_response_
 
 
 @pytest.mark.asyncio
-async def test_pause_download(monkeypatch, async_thread_runner):
-    # Set up mocks with slow task
-    # MockResponse(
-    #     chunks=[b"abc", b"def", b"ghi"], 
-    #     status=206, 
-    #     headers={
-    #         "Content-Length": "9",
-    #         "Accept-Ranges": "bytes"
-    #     },
-    #     chunk_iter_wait=2.0
-    # )
+async def test_pause_download(async_thread_runner, create_mock_response_and_set_mock_session):
+    chunks = [b"abc", b"def", b"ghi"]
+    mock_url = "https://example.com/file.bin"
+    mock_file_name = "test_file.bin"
+    if os.path.exists(mock_file_name):
+        os.remove(mock_file_name)
+    mock_response = create_mock_response_and_set_mock_session(
+        206,
+        {
+            "Content-Length": str(sum(len(c) for c in chunks)),
+            "Accept-Ranges": "bytes"
+        },
+        mock_url
+    )
 
-    # Add and start download
+    logging.debug("Add and start download")
+    dm = DownloadManager()
+    task_id = dm.add_download(mock_url, mock_file_name)
+    async_thread_runner.submit(dm.start_download(task_id))
 
-    # Call pause
+    logging.debug("Wait for dm to emit download running state")
+    await wait_for_state(dm, task_id, DownloadState.RUNNING)
 
-    # Check task is paused
-    pass
+    logging.debug("Give dm a chunk to write")
+    await mock_response.insert_chunk(chunks[0])
 
-# TODO: Test dmanager._tasks is cleaned up properly
+    logging.debug("Wait for dm to write the chunk")
+    count = 0
+    while not os.path.exists(mock_file_name):
+        await asyncio.sleep(1)
+        count += 1
+        assert(count < 20, "Timeout exceeded while waiting for file write")
+
+    logging.debug("Pause download")
+    async_thread_runner.submit(dm.pause_download(task_id))
+    
+    logging.debug("Wait for dm to emit download pause state")
+    await wait_for_state(dm, task_id, DownloadState.PAUSED)
+
+    # Task should be paused so we will give a chunk and wait some time to make sure pause stops file write
+    await mock_response.insert_chunk(chunks[0])
+    await asyncio.sleep(5)
+    
+    # Check _tasks is cleaned up and download state
+    assert(task_id not in dm._tasks)
+    assert(dm.get_downloads()[task_id].state == DownloadState.PAUSED)
+
+    logging.debug("Verifying only the first chunk was written to file")
+    expected_text = "abc"
+    with open(mock_file_name) as f:
+        file_text = f.read()
+        assert(file_text == expected_text, f"Downloaded file text did not match expected.\nDownloaded: {file_text}\nExpected: {expected_text}")
+
+    logging.debug("Cleanup")
+    if os.path.exists(mock_file_name):
+        os.remove(mock_file_name)
+
 
 @pytest.mark.asyncio
 async def test_resume_download(monkeypatch, async_thread_runner):
@@ -115,6 +156,7 @@ async def test_cancel_download(monkeypatch, async_thread_runner):
 
 # TODO: Error path tests
 # Chunk write Failure
+    # Fail Gracefully if can't get file?
 # Asyncio/Aiohttp errors
     # Network disconnect
     # Server Errors 500

@@ -72,10 +72,14 @@ class DownloadManager:
     def get_downloads(self) -> Dict[int, DownloadMetadata]:
         return self._downloads
 
-    async def get_latest_event(self) -> Optional[DownloadEvent]:
+    async def get_oldest_event(self) -> Optional[DownloadEvent]:
+        """
+        Pops the oldest event from the queue if the queue is not empty
+        """
         if self.events_queue.empty():
             return None
-        return await self.events_queue.get()
+        else:
+            return self.events_queue.get_nowait()            
 
     def add_download(self, url: str, output_file: Optional[str] = "") -> int:
         id = self._iterate_and_get_id()
