@@ -16,6 +16,15 @@ import aiofiles
 # TODO: Support parallel downloads
 # TODO: Save metadata to file: Persist preferences and download_metadata between restarts
 
+class DownloadState(Enum):
+    PAUSED = 0
+    RUNNING = 1
+    COMPLETED = 2
+    PENDING = 3
+    DELETED = 4
+    ERROR = -1
+
+
 @dataclass
 class DownloadEvent:
     task_id: int
@@ -31,15 +40,6 @@ class DownloadEvent:
 
     def __post_init__(self):
         self.time = datetime.now()
-
-
-class DownloadState(Enum):
-    PAUSED = 0
-    RUNNING = 1
-    COMPLETED = 2
-    PENDING = 3
-    DELETED = 4
-    ERROR = -1
 
 @dataclass
 class DownloadMetadata:
@@ -326,9 +326,12 @@ class DownloadManager:
                 async with session.get(download.url, headers=headers) as resp:
                     async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * 1024 * 1024):
                         chunk_start_time = datetime.now()
-                        mode = "ab"
-                        if resp.status == 200:
+                        if resp.status == 206:
+                            mode = "ab"
+                        elif resp.status == 200:
                             mode = "wb"
+                        else:
+                            raise Exception(f"Received {resp.status=}")
                         async with aiofiles.open(download.output_file, mode) as f:
                             await f.write(chunk)
 
