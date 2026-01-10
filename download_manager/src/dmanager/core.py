@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Any
 from mimetypes import guess_extension
 from datetime import datetime, timedelta
+from asyncio_taskpool import TaskPool
 
 import re
 import logging
@@ -11,6 +12,7 @@ import asyncio
 import aiohttp
 import aiofiles
 
+ONE_GB = 1073741824
 
 # TODO: Support default download folder
 # TODO: Support parallel downloads
@@ -54,6 +56,8 @@ class DownloadMetadata:
     time_added: datetime = datetime.now()
     state: DownloadState = DownloadState.PENDING
     server_supports_http_range: bool = False
+    use_parallel_download: bool = False
+    parallel_download_group_name: str = None
 
 
 class DownloadManager:
@@ -71,6 +75,7 @@ class DownloadManager:
         self._next_id = 0
         self.events_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._tasks: Dict[int, asyncio.Task[Any]] = {}
+        self._task_pools: Dict[int, asyncio.TaskGroup]
         self.chunk_write_size_mb = chunk_write_size_mb
         self.running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
 
@@ -110,9 +115,12 @@ class DownloadManager:
         self._downloads[id] = DownloadMetadata(task_id=id, url=url, output_file=output_file)
         return id
 
-    async def start_download(self, task_id: int) -> bool:
+    async def start_download(self, task_id: int, use_parallel_download: bool = None) -> bool:
         """
         Wraps download coroutine into task to start the download
+
+        :param task_id: Integer identifier for task
+        :param use_parallel_download: Explicit option to disable/enable parallel download
         """
         logging.debug("start_download called")
         if task_id not in self._downloads:
@@ -125,13 +133,27 @@ class DownloadManager:
 
         if download.state == DownloadState.ERROR:
             if os.path.exists(download.output_file):
-                os.remove(download.output_file)        
+                os.remove(download.output_file)
 
         if await self._check_download_headers(download) is False:
             return False
-        self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(download))
+
+        # TODO: double check later but should be ok
+        if download.file_size_bytes > ONE_GB and use_parallel_download is not False:
+            download.use_parallel_download = True
+        elif use_parallel_download is True:
+            download.use_parallel_download = True
+
+        if download.server_supports_http_range:
+            download.use_parallel_download = False
+
+        if download.use_parallel_download:
+            self._create_task_pool(download)
+        else:
+            self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(download))
         return True
 
+    # TODO: get rid of resume_download and just call start
     async def resume_download(self, task_id: int) -> bool:
         """
         Wraps download coroutine into task to resume download
@@ -146,11 +168,10 @@ class DownloadManager:
         if download.state not in [DownloadState.PAUSED, DownloadState.ERROR]:
             return False
         if download.state == DownloadState.ERROR:
-            await self.start_download(task_id)
+            return await self.start_download(task_id)
         else:
             if await self._check_download_headers(download) is False:
                 return False
-                
             self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id]))
 
         return True
@@ -172,18 +193,25 @@ class DownloadManager:
             logging.warning("Pause download called on non-running task")
             return False
 
-        if task_id not in self._tasks:
-            raise Exception("Error: task_id not in DownloadManager task list")
-        task = self._tasks[task_id]
-        if not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        
-        if task_id in self._tasks:
-            del self._tasks[task_id]
+        if download.use_parallel_download:
+            task_pool = self._task_pools[download.task_id]
+            task_pool.cancel_group(download.parallel_download_group_name)
+            await task_pool.flush()
+
+            del self._task_pools[download.task_id]
+        else:
+            if task_id not in self._tasks:
+                raise Exception("Error: task_id not in DownloadManager task list")
+            task = self._tasks[task_id]
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            
+            if task_id in self._tasks:
+                del self._tasks[task_id]
         return True
 
     async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
@@ -252,7 +280,7 @@ class DownloadManager:
                                 download.downloaded_bytes = 0
 
                     if "Accept-Ranges" in resp.headers:
-                            download.server_supports_http_range = resp.headers["Accept-Ranges"] == "bytes"
+                        download.server_supports_http_range = resp.headers["Accept-Ranges"] == "bytes"
                     
                     if download.output_file == "":
                         if "ETag" in resp.headers:
@@ -278,9 +306,6 @@ class DownloadManager:
             ))
             return False
 
-        return True
-
-    async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
         download.downloaded_bytes = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
 
         # Check if the file has already been completely downloaded
@@ -293,7 +318,7 @@ class DownloadManager:
                     output_file=download.output_file
                 ))
                 del self._tasks[download.task_id]
-                return
+                return False
             elif download.downloaded_bytes > download.file_size_bytes:
                 download.state = DownloadState.ERROR
                 await self.events_queue.put(DownloadEvent(
@@ -304,17 +329,37 @@ class DownloadManager:
                 ))
                 raise Exception("Downloaded bytes > expected file size")
 
-        # Download the file --------------------------------------------------------------------
+        return True
+    
+    def _create_task_pool(self, download: DownloadMetadata):
+        self._task_pools[download.task_id] = TaskPool()
+
+        data_queue = asyncio.Queue()
+
+        prev_bytes = 0
+        # TODO: Better partitioning
+        for end_bytes in range(0, download.file_size_bytes, download.file_size_bytes // ONE_GB):
+            data_queue.put((prev_bytes, end_bytes))
+            prev_bytes = end_bytes + 1
+
+        download.parallel_download_group_name = self._task_pools[download.task_id].apply(self._parallel_download_coroutine, args=(download, data_queue), num=5)
+
+    async def _parallel_download_coroutine(self, download: DownloadMetadata, data_queue: asyncio.Queue) -> None:
+        while True:
+            data = data_queue.get()
+            if not data:
+                return
+            start_bytes: int = data[0]
+            end_bytes: int = data[1]
+            headers = {
+                "Range": f"bytes={start_bytes}-{end_bytes}"
+            }
+            # TODO
+
+    async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
         headers = {}
         if download.server_supports_http_range:
             headers["Range"] = f"bytes={download.downloaded_bytes}-"
-
-        download.state = DownloadState.RUNNING
-        await self.events_queue.put(DownloadEvent(
-            task_id=download.task_id,
-            state=download.state,
-            output_file=download.output_file
-        ))
 
         last_running_update = datetime.now()
         last_active_time_update = datetime.now()
@@ -328,7 +373,7 @@ class DownloadManager:
                         elif resp.status == 200:
                             mode = "wb"
                         else:
-                            raise Exception(f"Received {resp.status=}")
+                            raise Exception(f"Received unexpected status: {resp.status=}")
                         async with aiofiles.open(download.output_file, mode) as f:
                             await f.write(chunk)
 
