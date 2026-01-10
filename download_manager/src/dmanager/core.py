@@ -21,10 +21,11 @@ class DownloadEvent:
     task_id: int
     state: DownloadState
     output_file: str
+    time: datetime = 0
+    error_string: Optional[str] = ""
     percent_completed: float = None
     download_speed: float = None
-    error_string: Optional[str] = ""
-    time: datetime = 0
+    active_time: timedelta = None
 
     def __post_init__(self):
         self.time = datetime.now()
@@ -58,7 +59,7 @@ class DownloadManager:
     Async download manager using asyncio and aiohttp.
     """
 
-    def __init__(self, chunk_write_size: int = 1) -> None:
+    def __init__(self, chunk_write_size_mb: int = 1, running_event_update_rate_seconds: int = 1) -> None:
         """
         :param chunk_write_size: How large of a chunk should the program write each time in MB
         :type chunk_write_size: int
@@ -68,7 +69,8 @@ class DownloadManager:
         self._next_id = 0
         self.events_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
         self._tasks: Dict[int, asyncio.Task[Any]] = {}
-        self.chunk_write_size = chunk_write_size
+        self.chunk_write_size_mb = chunk_write_size_mb
+        self.running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
 
     def _iterate_and_get_id(self) -> int:
         self._next_id += 1
@@ -285,7 +287,8 @@ class DownloadManager:
                 await self.events_queue.put(DownloadEvent(
                     task_id=download.task_id,
                     state=download.state,
-                    output_file=download.output_file
+                    output_file=download.output_file,
+                    percent_completed=100
                 ))
                 del self._tasks[download.task_id]
                 return
@@ -305,22 +308,25 @@ class DownloadManager:
         ))
 
         last_running_update = datetime.now()
+        last_active_time_update = datetime.now()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(download.url, headers=headers) as resp:
-                    async for chunk in resp.content.iter_chunked(self.chunk_write_size * 1024 * 1024):
-                        start = datetime.now()
+                    async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * 1024 * 1024):
+                        chunk_start_time = datetime.now()
                         mode = "ab"
                         if resp.status == 200:
                             mode = "wb"
                         async with aiofiles.open(download.output_file, mode) as f:
                             await f.write(chunk)
 
-                            time_delta = datetime.now() - start
-                            download.downloaded_bytes += len(chunk)                            
-                            download.active_time += time_delta
+                            chunk_time_delta = datetime.now() - chunk_start_time
+                            download.downloaded_bytes += len(chunk)
+
+                            download.active_time += datetime.now() - last_active_time_update
+                            last_active_time_update = datetime.now()
                             
-                            if datetime.now() - last_running_update > timedelta(seconds=2):
+                            if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
                                 last_running_update = datetime.now()
                                 percent_completed = None
                                 if download.file_size_bytes is not None:
@@ -331,7 +337,8 @@ class DownloadManager:
                                     state=download.state,
                                     output_file=download.output_file,
                                     percent_completed=percent_completed,
-                                    download_speed=len(chunk)/time_delta.total_seconds()
+                                    download_speed=len(chunk)/chunk_time_delta.total_seconds(),
+                                    active_time=download.active_time
                                 ))
 
             download.time_completed = datetime.now()
@@ -339,7 +346,10 @@ class DownloadManager:
             await self.events_queue.put(DownloadEvent(
                 task_id=download.task_id,
                 state= download.state,
-                output_file=download.output_file
+                output_file=download.output_file,
+                percent_completed=100,
+                download_speed=0,
+                active_time=download.active_time
             ))
 
             del self._tasks[download.task_id]

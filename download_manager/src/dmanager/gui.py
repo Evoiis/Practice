@@ -17,6 +17,7 @@ class DownloadManagerGUI:
         self.url_input_element = None
         self.file_name_input_element = None
         self.table = None
+        self.task_id_to_table_row = dict()
         self.root = tk.Tk()
         self.download_data: Dict[int: DownloadMetadata] = dict()
 
@@ -38,15 +39,33 @@ class DownloadManagerGUI:
 
         event = await self.dmanager.get_oldest_event()
 
-        if event is not None:
-            print(f"{event=}")
-            # self.table.insert(
-            #     "",
-            #     tk.END,
-            #     values=(1, "RUNNING", "http://example.com", "urmom.bin", "90%", "5 MB/s", None)
-            # )
+        if event is not None:                        
+            values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
+            values[1] = event.state.name
+            values[3] = event.output_file
+            if event.percent_completed is not None:
+                values[4] = round(event.percent_completed, 2)
+            if event.download_speed is not None:
+                values[5] = round((event.download_speed / (1048576)), 4)
+            values[6] = event.error_string
+            if event.active_time is not None:
+                seconds = event.active_time.total_seconds()
+                hours = 0
+                minutes = 0
 
-            pass
+                if seconds > 60:
+                    minutes = seconds // 60
+                    if minutes > 60:
+                        hours = minutes // 60
+                        minutes %= 60
+                    seconds %= 60
+            
+                values[7] = f"{hours}:{minutes}:{round(seconds, 2)}"
+
+            self.table.item(
+                self.task_id_to_table_row[event.task_id],
+                values=values
+            )
 
         self.root.after(self.event_poll_rate, self._add_read_event_loop_to_async_thread)
 
@@ -56,11 +75,21 @@ class DownloadManagerGUI:
 
         if not url:
             return
+        
+        self.url_input_element.delete(0, tk.END)
+        self.file_name_input_element.delete(0, tk.END)
 
         task_id = self.dmanager.add_download(
             url,
             file_name            
         )
+
+        self.task_id_to_table_row[task_id] = self.table.insert(
+            "",
+            tk.END,
+            values=(task_id, "PENDING", url, "", "", "", "", "")
+        )
+
         self.runner.submit(
             self.dmanager.start_download(
                 task_id
@@ -82,7 +111,7 @@ class DownloadManagerGUI:
             command=self._add_new_download
         ).grid(row=0, column=4)
 
-        table_columns = ("TaskID", "DownloadState", "URL", "OutputFile", "PercentComplete", "CurrentDownloadSpeed", "Error")
+        table_columns = ("Task ID", "Download State", "URL", "Output File", "Percent Complete", "Current Download Speed(MB/s)", "Error", "Active Time (H:M:S)")
         self.table = ttk.Treeview(
             self.root,
             columns=table_columns,
@@ -92,5 +121,12 @@ class DownloadManagerGUI:
 
         for column in table_columns:
             self.table.heading(column, text=column)
-            self.table.column(column, width=100)
+            if column == "Task ID":
+                self.table.column(column, width=50)
+            elif column == "Current Download Speed(MB/s)":
+                self.table.column(column, width=200)
+            elif column == "Percent Complete":
+                self.table.column(column, width=50)
+            else:
+                self.table.column(column, width=150)
 

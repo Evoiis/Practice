@@ -8,7 +8,7 @@ def main():
 
     logging.getLogger().setLevel(logging.INFO)
     runner = AsyncioEventLoopThread()
-    dmanager = DownloadManager(chunk_write_size=5)
+    dmanager = DownloadManager(chunk_write_size_mb=5)
 
     gui = DownloadManagerGUI(dmanager, runner)
 
