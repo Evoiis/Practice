@@ -44,6 +44,7 @@ class DownloadManagerGUI:
         event = await self.dmanager.get_oldest_event()
 
         if event is not None:
+            # print(event)
             if event.state == DownloadState.DELETED:
                 self.table.delete(self.task_id_to_table_row[event.task_id])
             else:                
@@ -99,7 +100,8 @@ class DownloadManagerGUI:
 
         self.runner.submit(
             self.dmanager.start_download(
-                task_id
+                task_id,
+                use_parallel_download=True
             )
         )
 
