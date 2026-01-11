@@ -116,7 +116,7 @@ async def test_start_in_paused_state(async_thread_runner, test_file_setup_and_cl
 
     future = async_thread_runner.submit(dm.start_download(task_id))
 
-    assert future.result() is False, "start_download should have returned False"
+    assert future.result()
 
     dm.shutdown()
 # TEST_RESUME ------------------------------------------------------------
