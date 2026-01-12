@@ -51,4 +51,4 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
         "".join(x.decode('ascii') for x in data.values())
     )
     
-    dm.shutdown()
+    await dm.shutdown()

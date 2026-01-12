@@ -38,6 +38,7 @@ class MockResponse:
         while not self.queue.empty():
             await self.queue.get()
 
+
 class MockSession:
     def __init__(self, responses):
         self._responses = responses
@@ -53,6 +54,10 @@ class MockSession:
 
     def head(self, url):
         return self._responses[url]
+    
+    async def close(self):
+        return
+
 
 class MockParallelResponse():
     def __init__(self, status, data: dict, request_queue: asyncio.Queue, headers={}):
@@ -85,6 +90,7 @@ class MockParallelResponse():
         while not self.queue.empty():
             await self.queue.get()
 
+
 class MockParallelSession:
     def __init__(self, responses, request_queue):
         self._responses = responses
@@ -102,6 +108,10 @@ class MockParallelSession:
 
     def head(self, url):
         return self._responses[url]
+
+    async def close(self):
+        return
+
 
 @pytest.fixture
 def async_thread_runner():

@@ -3,6 +3,7 @@ from src.dmanager.asyncio_thread import AsyncioEventLoopThread
 from src.dmanager.gui import DownloadManagerGUI
 
 import logging
+import asyncio
 
 def main():
 
@@ -14,7 +15,7 @@ def main():
 
     gui.run_gui_loop()
 
-    dmanager.shutdown()
+    runner.submit(dmanager.shutdown())
 
 if __name__ == "__main__":
     main()

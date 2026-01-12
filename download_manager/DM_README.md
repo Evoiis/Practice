@@ -13,8 +13,16 @@ A simple python download manager for windows.
 
 
 ### Planned:
+# TODO: Show worker progress in GUI
+# TODO: Support default download folder
+# TODO: Save metadata to file: Persist preferences and download_metadata between restarts
+
+# TODO: Get rid of resume_download and replace with start_downlaod
+# TODO: Parallel downloads support resume download
+# TODO Count worker errors and handle accordingly
 - Parallel downloads for large files
     - And new test for parallel downloads
+    - Resume support
 - Save metadata to file: Persist preferences and download_metadata between restarts
     - Support default download folder
 
