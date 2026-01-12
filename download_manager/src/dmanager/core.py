@@ -164,10 +164,13 @@ class DownloadManager:
             if os.path.exists(download.output_file):
                 os.remove(download.output_file)
 
-        if await self._check_download_headers(download) is False:
+        try:
+            await self._check_download_headers(download)
+        except Exception as err:
+            await self._log_and_share_error_event(download, err)
             return False
 
-
+        # Use parallel download decision
         if (download.file_size_bytes > ONE_GibiB and use_parallel_download is None) or use_parallel_download is True:
             download.use_parallel_download = True
 
@@ -175,9 +178,9 @@ class DownloadManager:
             download.use_parallel_download = False
         
 
-        logging.debug(f"Task {task_id}, {download.use_parallel_download=}")
-
+        # Initialize async tasks
         if download.use_parallel_download:
+            # Pre-allocate file on disk
             async with aiofiles.open(download.output_file, "wb") as f:
                 download.state = DownloadState.ALLOCATING_SPACE
                 await self.events_queue.put(DownloadEvent(
@@ -217,7 +220,7 @@ class DownloadManager:
             try:
                 await self._check_download_headers(download)
             except Exception as err:
-                self._log_and_share_error_event(download, err)
+                await self._log_and_share_error_event(download, err)
                 return False
 
             if await self._check_if_complete_file_on_disk(download):
@@ -565,7 +568,7 @@ class DownloadManager:
             ))
             raise
         except Exception as err:
-            self._log_and_share_error_event(download, err)
+            await self._log_and_share_error_event(download, err)
         finally:
             if download.task_id in self._tasks:
                 del self._tasks[download.task_id]

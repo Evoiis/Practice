@@ -88,7 +88,7 @@ async def test_input_invalid_url(async_thread_runner):
     task_id = dm.add_download(invalid_url, "")
     future = async_thread_runner.submit(dm.start_download(task_id))
 
-    assert not future.result()    
+    assert not future.result()
     await wait_for_state(dm, task_id, DownloadState.ERROR)
 
     await dm.shutdown()
