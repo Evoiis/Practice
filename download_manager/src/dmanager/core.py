@@ -231,7 +231,7 @@ class DownloadManager:
 
         :param task_id: Identifies which task to pause
         """
-        logging.debug("pause_download called")
+        logging.debug("[DM] pause_download called")
         if task_id not in self._downloads:
             logging.warning(f"Pause download called with invalid {task_id=}")
             return False
@@ -315,7 +315,7 @@ class DownloadManager:
 
         async with self._session.head(download.url) as resp:
             if "ETag" in resp.headers:
-                if download.etag ==None:
+                if download.etag == None:
                     download.etag = resp.headers["ETag"][1:-1]
                 elif resp.headers["ETag"][1:-1] != download.etag:
                     logging.debug(f"Etag changed for {download.task_id=}, {download.url=}, {download.output_file=}. Restarting download from scratch.")
@@ -503,20 +503,22 @@ class DownloadManager:
         ))
 
     async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
-        headers = {}
-        if download.server_supports_http_range:
-            headers["Range"] = f"bytes={download.downloaded_bytes}-"
-        
-        download.state = DownloadState.RUNNING
-        await self.events_queue.put(DownloadEvent(
-            task_id=download.task_id,
-            state=download.state,
-            output_file=download.output_file
-        ))
-
-        last_running_update = datetime.now()
-        last_active_time_update = datetime.now()
         try:
+            headers = {}
+
+            if download.server_supports_http_range:
+                headers["Range"] = f"bytes={download.downloaded_bytes}-"
+            
+            download.state = DownloadState.RUNNING
+            await self.events_queue.put(DownloadEvent(
+                task_id=download.task_id,
+                state=download.state,
+                output_file=download.output_file
+            ))
+
+            last_running_update = datetime.now() - self.running_event_update_rate_seconds
+            last_active_time_update = datetime.now()
+
             async with self._session.get(download.url, headers=headers) as resp:
                 async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
                     chunk_start_time = datetime.now()
@@ -534,7 +536,7 @@ class DownloadManager:
 
                     download.active_time += datetime.now() - last_active_time_update
                     last_active_time_update = datetime.now()
-                    
+
                     if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
                         last_running_update = datetime.now()
                         download.state = DownloadState.RUNNING
