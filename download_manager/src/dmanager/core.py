@@ -10,10 +10,10 @@ import os
 import asyncio
 import aiohttp
 import aiofiles
-import copy
 
 ONE_GIBIB = 1073741824
 ONE_MEBIBYTE = 1048576
+KIBIBYTE_256 = 262144
 
 # TODO: Support default download folder
 # TODO: Save metadata to file: Persist preferences and download_metadata between restarts
@@ -68,12 +68,7 @@ class DownloadManager:
     Async download manager using asyncio and aiohttp.
     """
 
-    def __init__(self, chunk_write_size_mb: int = 1, running_event_update_rate_seconds: int = 1, maximum_workers_per_task: int = 5) -> None:
-        """
-        :param chunk_write_size: How large of a chunk should the program write each time in MB
-        :type chunk_write_size: int
-        """
-
+    def __init__(self, running_event_update_rate_seconds: int = 1, maximum_workers_per_task: int = 5) -> None:
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
         self.events_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
@@ -82,8 +77,6 @@ class DownloadManager:
         self._data_queues: Dict[int, asyncio.Queue] = {}
         self._session: aiohttp.ClientSession = None
 
-        # TODO update mb -> MiB cause that's technically correct
-        self.chunk_write_size_mb = chunk_write_size_mb
         self.running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
         self.maximum_workers_per_task = maximum_workers_per_task
 
@@ -423,7 +416,7 @@ class DownloadManager:
         while True:
             try:
                 start_bytes, end_bytes = self._data_queues[download.task_id].get_nowait()
-                logging.debug(f"Worker {worker_id} picked up download range ({start_bytes}, {end_bytes})")
+                logging.debug(f"Task {download.task_id}, Worker {worker_id} picked up download range ({start_bytes}, {end_bytes})")
                 next_write_byte = start_bytes
                 
                 headers = {
@@ -435,7 +428,7 @@ class DownloadManager:
 
                 async with aiofiles.open(download.output_file, "r+b") as f:
                     async with self._session.get(download.url, headers=headers) as resp:
-                        async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * ONE_MEBIBYTE):
+                        async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
                             chunk_start_time = datetime.now()
                             if resp.status != 206:
                                 raise Exception(f"[Parallel] Received unexpected status: {resp.status=}")
@@ -447,23 +440,23 @@ class DownloadManager:
 
                             chunk_time_delta = datetime.now() - chunk_start_time
 
-                        active_time += datetime.now() - last_active_time_update 
-                        last_active_time_update = datetime.now()
+                            active_time += datetime.now() - last_active_time_update 
+                            last_active_time_update = datetime.now()
 
-                        if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
-                            last_running_update = datetime.now()
+                            if (datetime.now() - last_running_update) > timedelta(seconds=0.5):
+                                last_running_update = datetime.now()
 
-                            download.state = DownloadState.RUNNING
-                            await self.events_queue.put(DownloadEvent(
-                                task_id=download.task_id,
-                                state=download.state,
-                                output_file=download.output_file,
-                                download_speed=len(chunk)/chunk_time_delta.total_seconds(),
-                                active_time=download.active_time,
-                                downloaded_bytes=download.downloaded_bytes,
-                                download_size_bytes=download.file_size_bytes,
-                                worker_id=worker_id
-                            ))
+                                download.state = DownloadState.RUNNING
+                                await self.events_queue.put(DownloadEvent(
+                                    task_id=download.task_id,
+                                    state=download.state,
+                                    output_file=download.output_file,
+                                    download_speed=len(chunk)/chunk_time_delta.total_seconds(),
+                                    active_time=download.active_time,
+                                    downloaded_bytes=download.downloaded_bytes,
+                                    download_size_bytes=download.file_size_bytes,
+                                    worker_id=worker_id
+                                ))
             
             except asyncio.CancelledError:
                 if next_write_byte != end_bytes:
@@ -525,7 +518,7 @@ class DownloadManager:
         last_active_time_update = datetime.now()
         try:
             async with self._session.get(download.url, headers=headers) as resp:
-                async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * ONE_MEBIBYTE):
+                async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
                     chunk_start_time = datetime.now()
                     if resp.status == 206:
                         mode = "ab"

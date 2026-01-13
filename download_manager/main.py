@@ -3,13 +3,13 @@ from src.dmanager.asyncio_thread import AsyncioEventLoopThread
 from src.dmanager.gui import DownloadManagerGUI
 
 import logging
-import asyncio
 
 def main():
 
     logging.getLogger().setLevel(logging.INFO)
+    # logging.getLogger().setLevel(logging.DEBUG)
     runner = AsyncioEventLoopThread()
-    dmanager = DownloadManager(chunk_write_size_mb=5)
+    dmanager = DownloadManager()
 
     gui = DownloadManagerGUI(dmanager, runner)
 
