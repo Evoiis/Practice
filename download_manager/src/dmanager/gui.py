@@ -58,8 +58,6 @@ class DownloadManagerGUI:
                     if (event.task_id, event.worker_id) in self.task_id_and_worker_id_to_table_row:
                         values = list(self.table.item(self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)], "values"))
 
-                        print(f"{values=}")
-
                         values[1] = event.state.name
                         values[5] = f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s"
                         values[6] = event.error_string
@@ -73,7 +71,7 @@ class DownloadManagerGUI:
                         self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)] = self.table.insert(
                             self.task_id_to_table_row[event.task_id],
                             "end",
-                            values=(f"Worker: {event.worker_id}", event.state.name, "", "", "", f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s" , event.error_string, event.active_time, "", "", "")
+                            values=(f"🔼 Worker: {event.worker_id}", event.state.name, "", "", "", f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s" , event.error_string, event.active_time, "", "", "")
                         )
                     
                     values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
@@ -239,7 +237,9 @@ class DownloadManagerGUI:
         for column in table_columns:
             self.table.heading(column, text=column)
             if column == "Task ID":
-                self.table.column(column, width=75)
+                self.table.column(column, width=100)
+            elif column == "Download State":
+                self.table.column(column, width=100)
             elif column == "Current Download Speed(MiB/s)":
                 self.table.column(column, width=200)
             elif column == "Downloaded / Total Size (%)":

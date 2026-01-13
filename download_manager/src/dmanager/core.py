@@ -12,7 +12,8 @@ import aiohttp
 import aiofiles
 import copy
 
-ONE_GibiB = 1073741824
+ONE_GIBIB = 1073741824
+ONE_MEBIBYTE = 1048576
 
 # TODO: Support default download folder
 # TODO: Save metadata to file: Persist preferences and download_metadata between restarts
@@ -171,7 +172,7 @@ class DownloadManager:
             return False
 
         # Use parallel download decision
-        if (download.file_size_bytes > ONE_GibiB and use_parallel_download is None) or use_parallel_download is True:
+        if (download.file_size_bytes > ONE_GIBIB and use_parallel_download is None) or use_parallel_download is True:
             download.use_parallel_download = True
 
         if not download.server_supports_http_range or use_parallel_download is False:
@@ -293,7 +294,8 @@ class DownloadManager:
             del self._tasks[task_id]
         
         if remove_file:
-            os.remove(self._downloads[task_id].output_file)
+            if os.path.exists(self._downloads[task_id].output_file):
+                os.remove(self._downloads[task_id].output_file)
         
         if task_id in self._downloads:
             del self._downloads[task_id]
@@ -389,10 +391,10 @@ class DownloadManager:
 
         prev_bytes = None
 
-        if download.file_size_bytes < ONE_GibiB:
+        if download.file_size_bytes < ONE_GIBIB:
             increment = int(download.file_size_bytes // 4)
         else:
-            increment = int(download.file_size_bytes // (download.file_size_bytes // (ONE_GibiB/2)))
+            increment = int(download.file_size_bytes // (download.file_size_bytes // (ONE_GIBIB/2)))
         
         for end_bytes in range(0, download.file_size_bytes + 1, increment):
             if prev_bytes is not None:
@@ -401,7 +403,7 @@ class DownloadManager:
 
         n_workers = min(self.maximum_workers_per_task, self._data_queues[task_id].qsize())
 
-        logging.info(f"{self._data_queues[task_id]=}")
+        logging.debug(f"{self._data_queues[task_id]=}")
 
         logging.debug(f"Starting {n_workers=}")
         for n in range(n_workers):
@@ -433,7 +435,7 @@ class DownloadManager:
 
                 async with aiofiles.open(download.output_file, "r+b") as f:
                     async with self._session.get(download.url, headers=headers) as resp:
-                        async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * 1024 * 1024):
+                        async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * ONE_MEBIBYTE):
                             chunk_start_time = datetime.now()
                             if resp.status != 206:
                                 raise Exception(f"[Parallel] Received unexpected status: {resp.status=}")
@@ -522,37 +524,36 @@ class DownloadManager:
         last_running_update = datetime.now()
         last_active_time_update = datetime.now()
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(download.url, headers=headers) as resp:
-                    async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * 1024 * 1024):
-                        chunk_start_time = datetime.now()
-                        if resp.status == 206:
-                            mode = "ab"
-                        elif resp.status == 200:
-                            mode = "wb"
-                        else:
-                            raise Exception(f"Received unexpected status: {resp.status=}")
-                        async with aiofiles.open(download.output_file, mode) as f:
-                            await f.write(chunk)
+            async with self._session.get(download.url, headers=headers) as resp:
+                async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * ONE_MEBIBYTE):
+                    chunk_start_time = datetime.now()
+                    if resp.status == 206:
+                        mode = "ab"
+                    elif resp.status == 200:
+                        mode = "wb"
+                    else:
+                        raise Exception(f"Received unexpected status: {resp.status=}")
+                    async with aiofiles.open(download.output_file, mode) as f:
+                        await f.write(chunk)
 
-                        chunk_time_delta = datetime.now() - chunk_start_time
-                        download.downloaded_bytes += len(chunk)
+                    chunk_time_delta = datetime.now() - chunk_start_time
+                    download.downloaded_bytes += len(chunk)
 
-                        download.active_time += datetime.now() - last_active_time_update
-                        last_active_time_update = datetime.now()
-                        
-                        if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
-                            last_running_update = datetime.now()
-                            download.state = DownloadState.RUNNING
-                            await self.events_queue.put(DownloadEvent(
-                                task_id=download.task_id,
-                                state=download.state,
-                                output_file=download.output_file,
-                                download_speed=len(chunk)/chunk_time_delta.total_seconds(),
-                                active_time=download.active_time,
-                                downloaded_bytes=download.downloaded_bytes,
-                                download_size_bytes=download.file_size_bytes
-                            ))
+                    download.active_time += datetime.now() - last_active_time_update
+                    last_active_time_update = datetime.now()
+                    
+                    if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
+                        last_running_update = datetime.now()
+                        download.state = DownloadState.RUNNING
+                        await self.events_queue.put(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                            download_speed=len(chunk)/chunk_time_delta.total_seconds(),
+                            active_time=download.active_time,
+                            downloaded_bytes=download.downloaded_bytes,
+                            download_size_bytes=download.file_size_bytes
+                        ))
 
             download.state = DownloadState.COMPLETED
             await self.events_queue.put(DownloadEvent(
