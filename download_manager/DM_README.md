@@ -20,6 +20,17 @@ A simple python download manager for windows.
 # TODO: Get rid of resume_download and replace with start_downlaod
 # TODO: Parallel downloads support resume download
 # TODO Count worker errors and handle accordingly
+# TODO: Parallel download pipeline needs to check if file is downloaded before allocating space
+# TODO: Output file auto naming rework?
+
+# TODO more parallel tests
+# Delete running
+# Resume parallel download
+# Multiple different downloads at the same time
+# TODO more tests with delete
+# Delete download and re-add the same download
+# delete download with/without deleting the file
+
 - Parallel downloads for large files
     - And new test for parallel downloads
     - Resume support

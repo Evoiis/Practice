@@ -68,7 +68,7 @@ class DownloadManager:
     Async download manager using asyncio and aiohttp.
     """
 
-    def __init__(self, running_event_update_rate_seconds: int = 1, maximum_workers_per_task: int = 5) -> None:
+    def __init__(self, running_event_update_rate_seconds: int = 1, parallel_running_event_update_rate_seconds: int = 0.5, maximum_workers_per_task: int = 5) -> None:
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
         self.events_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
@@ -77,8 +77,9 @@ class DownloadManager:
         self._data_queues: Dict[int, asyncio.Queue] = {}
         self._session: aiohttp.ClientSession = None
 
-        self.running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
-        self.maximum_workers_per_task = maximum_workers_per_task
+        self._running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
+        self._parallel_running_event_update_rate_seconds = timedelta(seconds=parallel_running_event_update_rate_seconds)
+        self._maximum_workers_per_task = maximum_workers_per_task
 
     def _iterate_and_get_id(self) -> int:
         self._next_id += 1
@@ -175,16 +176,16 @@ class DownloadManager:
         # Initialize async tasks
         if download.use_parallel_download:
             # Pre-allocate file on disk
-            async with aiofiles.open(download.output_file, "wb") as f:
-                download.state = DownloadState.ALLOCATING_SPACE
-                await self.events_queue.put(DownloadEvent(
-                    task_id=task_id,
-                    state=download.state,
-                    output_file=None
-                ))
-                await f.truncate(download.file_size_bytes)
-
             try:
+                async with aiofiles.open(download.output_file, "wb") as f:
+                    download.state = DownloadState.ALLOCATING_SPACE
+                    await self.events_queue.put(DownloadEvent(
+                        task_id=task_id,
+                        state=download.state,
+                        output_file=None
+                    ))
+                    await f.truncate(download.file_size_bytes)
+
                 await self._create_task_pool(download)
             except Exception as err:
                 await self._log_and_share_error_event(download, err)
@@ -394,7 +395,7 @@ class DownloadManager:
                 await self._data_queues[task_id].put((prev_bytes, end_bytes))
             prev_bytes = end_bytes
 
-        n_workers = min(self.maximum_workers_per_task, self._data_queues[task_id].qsize())
+        n_workers = min(self._maximum_workers_per_task, self._data_queues[task_id].qsize())
 
         logging.debug(f"{self._data_queues[task_id]=}")
 
@@ -423,7 +424,7 @@ class DownloadManager:
                     "Range": f"bytes={start_bytes}-{end_bytes}"
                 }
 
-                last_running_update = datetime.now()
+                last_running_update = datetime.now() - self._parallel_running_event_update_rate_seconds
                 last_active_time_update = datetime.now()
 
                 async with aiofiles.open(download.output_file, "r+b") as f:
@@ -443,7 +444,7 @@ class DownloadManager:
                             active_time += datetime.now() - last_active_time_update 
                             last_active_time_update = datetime.now()
 
-                            if (datetime.now() - last_running_update) > timedelta(seconds=0.5):
+                            if (datetime.now() - last_running_update) > self._parallel_running_event_update_rate_seconds:
                                 last_running_update = datetime.now()
 
                                 download.state = DownloadState.RUNNING
@@ -452,7 +453,7 @@ class DownloadManager:
                                     state=download.state,
                                     output_file=download.output_file,
                                     download_speed=len(chunk)/chunk_time_delta.total_seconds(),
-                                    active_time=download.active_time,
+                                    active_time=active_time,
                                     downloaded_bytes=download.downloaded_bytes,
                                     download_size_bytes=download.file_size_bytes,
                                     worker_id=worker_id
@@ -496,7 +497,7 @@ class DownloadManager:
             state= download.state,
             output_file=download.output_file,
             download_speed=0,
-            active_time=download.active_time,
+            active_time=active_time,
             downloaded_bytes=download.downloaded_bytes,
             download_size_bytes=download.file_size_bytes,
             worker_id=worker_id
@@ -516,7 +517,7 @@ class DownloadManager:
                 output_file=download.output_file
             ))
 
-            last_running_update = datetime.now() - self.running_event_update_rate_seconds
+            last_running_update = datetime.now() - self._running_event_update_rate_seconds
             last_active_time_update = datetime.now()
 
             async with self._session.get(download.url, headers=headers) as resp:
@@ -537,7 +538,7 @@ class DownloadManager:
                     download.active_time += datetime.now() - last_active_time_update
                     last_active_time_update = datetime.now()
 
-                    if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
+                    if (datetime.now() - last_running_update) > self._running_event_update_rate_seconds:
                         last_running_update = datetime.now()
                         download.state = DownloadState.RUNNING
                         await self.events_queue.put(DownloadEvent(

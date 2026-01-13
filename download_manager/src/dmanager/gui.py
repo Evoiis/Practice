@@ -8,8 +8,6 @@ from tkinter import ttk
 
 import logging
 
-# TODO Show worker progress in GUI
-
 ONE_MEBIBYTE = 1048576
 
 class DownloadManagerGUI:
@@ -19,6 +17,8 @@ class DownloadManagerGUI:
         self.dmanager = dmanager
         self.event_poll_rate = event_poll_rate
         
+        self.parallel_options = ["AUTO", "ON", "OFF"]
+        self.use_parallel_choice = None
         self.url_input_element = None
         self.file_name_input_element = None
         self.table = None
@@ -44,12 +44,28 @@ class DownloadManagerGUI:
     def _add_read_event_loop_to_async_thread(self):
         self.runner.submit(self._read_event_loop())
 
+    @staticmethod
+    def _translate_active_time_to_string(active_time):
+        if active_time is not None:
+            seconds = active_time.total_seconds()
+            hours = 0
+            minutes = 0
+
+            if seconds > 60:
+                minutes = seconds // 60
+                if minutes > 60:
+                    hours = minutes // 60
+                    minutes %= 60
+                seconds %= 60
+        
+            return f"{int(hours)}:{int(minutes)}:{int(seconds)}"
+
     async def _read_event_loop(self):
         try:
             event = await self.dmanager.get_oldest_event()
 
             if event is not None:
-                print(event)
+                logging.debug(event)
                 if event.state == DownloadState.DELETED:
                     self.table.delete(self.task_id_to_table_row[event.task_id])
                     return 
@@ -61,7 +77,7 @@ class DownloadManagerGUI:
                         values[1] = event.state.name
                         values[5] = f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s"
                         values[6] = event.error_string
-                        values[7] = event.active_time
+                        values[7] = self._translate_active_time_to_string(event.active_time)
 
                         self.table.item(
                             self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)],
@@ -79,22 +95,6 @@ class DownloadManagerGUI:
                     values[3] = event.output_file
                     if event.downloaded_bytes is not None and event.download_size_bytes is not None:
                         values[4] = f"{round(event.downloaded_bytes/ONE_MEBIBYTE, 4)} MiB / {round(event.download_size_bytes/ONE_MEBIBYTE, 4)} MiB ({round(100*event.downloaded_bytes/event.download_size_bytes, 2)})"
-                    if event.download_speed is not None:
-                        values[5] = f"{round((event.download_speed / (ONE_MEBIBYTE)), 4)} MiB/s"
-                    values[6] = event.error_string
-                    if event.active_time is not None:
-                        seconds = event.active_time.total_seconds()
-                        hours = 0
-                        minutes = 0
-
-                        if seconds > 60:
-                            minutes = seconds // 60
-                            if minutes > 60:
-                                hours = minutes // 60
-                                minutes %= 60
-                            seconds %= 60
-                    
-                        values[7] = f"{int(hours)}:{int(minutes)}:{int(seconds)}"
 
                     self.table.item(
                         self.task_id_to_table_row[event.task_id],
@@ -111,19 +111,7 @@ class DownloadManagerGUI:
                     if event.download_speed is not None:
                         values[5] = f"{round((event.download_speed / (ONE_MEBIBYTE)), 4)} MiB/s"
                     values[6] = event.error_string
-                    if event.active_time is not None:
-                        seconds = event.active_time.total_seconds()
-                        hours = 0
-                        minutes = 0
-
-                        if seconds > 60:
-                            minutes = seconds // 60
-                            if minutes > 60:
-                                hours = minutes // 60
-                                minutes %= 60
-                            seconds %= 60
-                    
-                        values[7] = f"{int(hours)}:{int(minutes)}:{int(seconds)}"
+                    values[7] = self._translate_active_time_to_string(event.active_time)
 
                     self.table.item(
                         self.task_id_to_table_row[event.task_id],
@@ -155,10 +143,18 @@ class DownloadManagerGUI:
             values=(task_id, "PENDING", url, "", "", "", "", "", "▶️ RESUME ▶️", "⏸️ PAUSE ⏸️", "❌ DELETE ❌")
         )
 
+        pc_choice = self.use_parallel_choice.get()
+        if pc_choice == "ON":
+            use_parallel_download = True
+        elif pc_choice == "OFF":
+            use_parallel_download = False
+        else:
+            use_parallel_download = None
+
         self.runner.submit(
             self.dmanager.start_download(
                 task_id,
-                use_parallel_download=True # TODO remove, this is just for test
+                use_parallel_download=use_parallel_download
             )
         )
 
@@ -217,11 +213,20 @@ class DownloadManagerGUI:
         self.file_name_input_element = tk.Entry(first_row_frame, width=50)
         self.file_name_input_element.grid(row=0, column=3, padx=5)
 
+        tk.Label(first_row_frame, text="Parallel Download:").grid(row=0, column=4)
+        self.use_parallel_choice = tk.StringVar(value=self.parallel_options[0])
+        ttk.Combobox(
+            first_row_frame,
+            textvariable=self.use_parallel_choice,
+            values=self.parallel_options,
+            state="readonly"
+        ).grid(row=0, column=5, padx=5)
+
         tk.Button(
             first_row_frame, 
             text="Add Download", 
             command=self._add_new_download
-        ).grid(row=0, column=4, padx=5)
+        ).grid(row=0, column=6, padx=5)
 
         # Table
         table_columns = ("Task ID", "Download State", "URL", "Output File", "Downloaded / Total Size (%)", "Current Download Speed", "Error", "Active Time (H:M:S)", "", "", "")
