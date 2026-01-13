@@ -257,8 +257,7 @@ class DownloadManager:
                         await task
                     except asyncio.CancelledError:
                         pass
-            del self._tasks[task_id]
-
+                
             del self._task_pools[download.task_id]
         else:
             if task_id not in self._tasks:
@@ -295,7 +294,9 @@ class DownloadManager:
         
         if remove_file:
             os.remove(self._downloads[task_id].output_file)
-        del self._downloads[task_id]
+        
+        if task_id in self._downloads:
+            del self._downloads[task_id]
 
         await self.events_queue.put(
             DownloadEvent(
@@ -400,6 +401,8 @@ class DownloadManager:
 
         n_workers = min(self.maximum_workers_per_task, self._data_queues[task_id].qsize())
 
+        logging.info(f"{self._data_queues[task_id]=}")
+
         logging.debug(f"Starting {n_workers=}")
         for n in range(n_workers):
             self._task_pools[task_id].append(
@@ -414,6 +417,7 @@ class DownloadManager:
         logging.debug(f"Task {download.task_id}, Worker {worker_id} initialized.")
         next_write_byte = 0
         end_bytes = 0
+        active_time = timedelta()
         while True:
             try:
                 start_bytes, end_bytes = self._data_queues[download.task_id].get_nowait()
@@ -427,7 +431,7 @@ class DownloadManager:
                 last_running_update = datetime.now()
                 last_active_time_update = datetime.now()
 
-                async with aiofiles.open(download.output_file, "r+b") as f:                    
+                async with aiofiles.open(download.output_file, "r+b") as f:
                     async with self._session.get(download.url, headers=headers) as resp:
                         async for chunk in resp.content.iter_chunked(self.chunk_write_size_mb * 1024 * 1024):
                             chunk_start_time = datetime.now()
@@ -437,11 +441,11 @@ class DownloadManager:
                             await f.write(chunk)
 
                             next_write_byte += len(chunk)
-
-                            chunk_time_delta = datetime.now() - chunk_start_time
                             download.downloaded_bytes += len(chunk)
 
-                        download.active_time += datetime.now() - last_active_time_update 
+                            chunk_time_delta = datetime.now() - chunk_start_time
+
+                        active_time += datetime.now() - last_active_time_update 
                         last_active_time_update = datetime.now()
 
                         if (datetime.now() - last_running_update) > self.running_event_update_rate_seconds:
@@ -462,11 +466,13 @@ class DownloadManager:
             except asyncio.CancelledError:
                 if next_write_byte != end_bytes:
                     self._data_queues[download.task_id].put_nowait((next_write_byte, end_bytes))
+
                 download.state = DownloadState.PAUSED
                 await self.events_queue.put(DownloadEvent(
                     task_id=download.task_id,
                     state= download.state,
-                    output_file=download.output_file
+                    output_file=download.output_file,
+                    worker_id=worker_id
                 ))
                 raise
             except asyncio.QueueEmpty:
@@ -484,7 +490,8 @@ class DownloadManager:
                     task_id=download.task_id,
                     state= download.state,
                     error_string=f"{repr(err)}, {err}",
-                    output_file=download.output_file
+                    output_file=download.output_file,
+                    worker_id=worker_id
                 ))
                 return
 

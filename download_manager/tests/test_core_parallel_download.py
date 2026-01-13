@@ -9,7 +9,7 @@ from tests.helpers import wait_for_state, verify_file, wait_for_file_to_be_creat
 
 @pytest.mark.parametrize(
     "n_workers",
-    [1, 5]
+    [1, 4]
 )
 @pytest.mark.asyncio
 async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup, n_workers):
@@ -44,7 +44,9 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     async_thread_runner.submit(dm.start_download(task_id, use_parallel_download=True)) 
     
     await wait_for_state(dm, task_id, DownloadState.ALLOCATING_SPACE)
-    await wait_for_state(dm, task_id, DownloadState.COMPLETED)
+
+    for _ in range(n_workers):
+        await wait_for_state(dm, task_id, DownloadState.COMPLETED)
 
     verify_file(
         mock_file_name,
@@ -52,3 +54,9 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     )
     
     await dm.shutdown()
+
+
+# TODO more parallel tests
+# Delete running
+# Resume parallel download
+# Multiple different downloads at the same time
