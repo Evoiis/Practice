@@ -60,7 +60,7 @@ class DownloadMetadata:
     active_time: timedelta = timedelta()
     state: DownloadState = DownloadState.PENDING
     server_supports_http_range: bool = False
-    use_parallel_download: bool = False
+    use_parallel_download: bool = None
     error_count: int = 0
 
 
@@ -172,47 +172,70 @@ class DownloadManager:
             await self._log_and_share_error_event(download, err)
             return False
 
-        # Use parallel download decision
-        if (download.file_size_bytes > ONE_GIBIB and use_parallel_download is None) or use_parallel_download is True:
-            download.use_parallel_download = True
-
-        if not download.server_supports_http_range or use_parallel_download is False:
+        # Parallel download decision
+        if download.use_parallel_download == None:
             download.use_parallel_download = False
-        
+            if (download.file_size_bytes > ONE_GIBIB and use_parallel_download is None) or use_parallel_download is True:
+                download.use_parallel_download = True
 
-        # Initialize async tasks
+            if not download.server_supports_http_range or use_parallel_download is False:
+                download.use_parallel_download = False
+
+        # Initialize async downloads
         if download.use_parallel_download:
-            # Pre-allocate file on disk
-            if await self._check_if_complete_file_on_disk(download):
-                if download.task_id in self._data_queues and self._data_queues[download.task_id].empty():
-                    return False
-            try:
-                if download.task_id not in self._data_queues:
-                    async with aiofiles.open(download.output_file, "wb") as f:
-                        download.state = DownloadState.ALLOCATING_SPACE
-                        await self.events_queue.put(DownloadEvent(
-                            task_id=task_id,
-                            state=download.state,
-                            output_file=None
-                        ))
-                        await f.truncate(download.file_size_bytes)
-
-                await self._create_task_pool(download)
-            except Exception as err:
-                tb = traceback.format_exc()
-                logging.error(f"Traceback: {tb}")
-                await self._log_and_share_error_event(download, err)
+            await self._run_parallel_connection_download(download) 
         else:
-            if await self._check_if_complete_file_on_disk(download):
-                return False
-            self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(download))
+            await self._run_single_connection_download(download)
         return True
+
+    async def _run_parallel_connection_download(self, download: DownloadMetadata):
+        if await self._check_if_complete_file_on_disk(download):
+            if download.task_id in self._data_queues and self._data_queues[download.task_id].empty():
+                logging.debug("Found complete file in directory. Not starting/restarting download.")
+                download.state = DownloadState.COMPLETED
+                await self.events_queue.put(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.state,
+                    output_file=download.output_file
+                ))
+                del self._tasks[download.task_id]
+                return False
+        try:
+            if download.task_id not in self._data_queues:
+                # Pre-allocate file on disk
+                async with aiofiles.open(download.output_file, "wb") as f:
+                    download.state = DownloadState.ALLOCATING_SPACE
+                    await self.events_queue.put(DownloadEvent(
+                        task_id=download.task_id,
+                        state=download.state,
+                        output_file=None
+                    ))
+                    await f.truncate(download.file_size_bytes)
+
+            await self._create_task_pool(download)
+        except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+
+    async def _run_single_connection_download(self, download:DownloadMetadata):
+        if await self._check_if_complete_file_on_disk(download):
+            download.state = DownloadState.COMPLETED
+            await self.events_queue.put(DownloadEvent(
+                task_id=download.task_id,
+                state=download.state,
+                output_file=download.output_file
+            ))
+            del self._tasks[download.task_id]
+            return False
+        self._tasks[download.task_id] = asyncio.create_task(self._download_file_coroutine(download))
 
 
     async def resume_download(self, task_id: int) -> bool:
         """
         Wraps download coroutine into task to resume download
         """
+        # TODO: Deprecate and update
         return await self.start_download(task_id)
 
     async def pause_download(self, task_id: int) -> bool:
@@ -357,23 +380,17 @@ class DownloadManager:
     async def _check_if_complete_file_on_disk(self, download: DownloadMetadata):
         if download.file_size_bytes is not None:
             if download.downloaded_bytes == download.file_size_bytes:
-                download.state = DownloadState.COMPLETED
-                await self.events_queue.put(DownloadEvent(
-                    task_id=download.task_id,
-                    state=download.state,
-                    output_file=download.output_file
-                ))
-                del self._tasks[download.task_id]
                 return True
-            elif download.downloaded_bytes != download.file_size_bytes:
+            elif download.downloaded_bytes > download.file_size_bytes:
                 download.state = DownloadState.ERROR
                 await self.events_queue.put(DownloadEvent(
                     task_id=download.task_id,
                     state= download.state,
-                    error_string="There is already a downloaded file with the same name with a different size!",
+                    error_string="There is already a downloaded file with the same name with a greater size!",
                     output_file=download.output_file
                 ))
-                return False
+                # TODO: rework output file naming
+                raise Exception("Existing file blocking output file.")
         
         return False
 

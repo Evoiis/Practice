@@ -2,7 +2,9 @@ import asyncio
 import pytest
 import os
 import logging
+import copy
 
+from typing import Dict
 from dmanager.asyncio_thread import AsyncioEventLoopThread
 
 
@@ -60,14 +62,14 @@ class MockSession:
 
 
 class MockParallelResponse():
-    def __init__(self, status, data: dict, request_queue: asyncio.Queue, headers: dict, auto_break: bool):
+    def __init__(self, status, request_queue: asyncio.Queue, headers: dict, range_ends: list, data: dict):
         self.status = status
         self.headers = headers
         self.content = self
         self.request_queue = request_queue
-        self.stop = False
-        self.data = data
-        self.auto_break = auto_break
+        self.data = copy.deepcopy(data)
+        self.send_next_letter: Dict[str: int] = {x:0 for x in range_ends}
+        self.done = {x: False for x in range_ends}
 
     async def __aenter__(self):
         return self
@@ -75,15 +77,29 @@ class MockParallelResponse():
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def iter_chunked(self, chunk_size_limit):
-        while not self.stop:
-            if not self.request_queue.empty():
-                data_range_request = await self.request_queue.get()
-                yield self.data[data_range_request]
-                if self.auto_break:
+    async def iter_chunked(self, _):
+        data_range_request = await self.request_queue.get()
+        range_end = data_range_request.split("-")[-1]
+        while True:
+            if range_end not in self.send_next_letter:
+                raise Exception(f"Got unexpected {range_end=}")
+            if self.send_next_letter[range_end] > 0:
+                if len(self.data[range_end]) > 0:
+                    yield bytes([self.data[range_end].pop(0)])
+                    self.send_next_letter[range_end] -= 1
+                else:
+                    # No more data to send
                     break
             else:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1)
+            if self.done[range_end] and self.send_next_letter[range_end] == 0:
+                break
+    
+    def set_range_end_n_send(self, range_end, n):
+        self.send_next_letter[range_end] = n
+    
+    def set_range_end_done(self, range_end):
+        self.done[range_end] = True
 
     def end_response(self):
         self.stop = True
@@ -134,8 +150,8 @@ def create_mock_response_and_set_mock_session(monkeypatch):
 @pytest.fixture
 def create_parallel_mock_response_and_set_mock_session(monkeypatch):
 
-    def factory(return_status, headers, mock_url, request_queue, data, auto_break):
-        mock_response = MockParallelResponse(return_status, data, request_queue, headers, auto_break)
+    def factory(return_status, headers, mock_url, request_queue, range_ends, data):
+        mock_response = MockParallelResponse(return_status, request_queue, headers, range_ends, data)
         monkeypatch.setattr("aiohttp.ClientSession", lambda: MockParallelSession({mock_url: mock_response}, request_queue))
         return mock_response
     
