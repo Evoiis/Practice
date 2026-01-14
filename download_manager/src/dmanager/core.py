@@ -10,6 +10,7 @@ import os
 import asyncio
 import aiohttp
 import aiofiles
+import traceback
 
 ONE_GIBIB = 1073741824
 ONE_MEBIBYTE = 1048576
@@ -163,6 +164,8 @@ class DownloadManager:
         try:
             await self._check_download_headers(download)
         except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
             return False
 
@@ -192,6 +195,8 @@ class DownloadManager:
 
                 await self._create_task_pool(download)
             except Exception as err:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
                 await self._log_and_share_error_event(download, err)
         else:
             if await self._check_if_complete_file_on_disk(download):
@@ -205,30 +210,6 @@ class DownloadManager:
         Wraps download coroutine into task to resume download
         """
         return await self.start_download(task_id)
-
-        # if task_id not in self._downloads:
-        #     logging.warning(f"Received invalid {task_id=} in resume_download")
-        #     return False
-
-        # download = self._downloads[task_id]
-
-        # if download.state not in [DownloadState.PAUSED, DownloadState.ERROR]:
-        #     return False
-        # if download.state == DownloadState.ERROR:
-        #     return await self.start_download(task_id)
-        # else:            
-        #     try:
-        #         await self._check_download_headers(download)
-        #     except Exception as err:
-        #         await self._log_and_share_error_event(download, err)
-        #         return False
-
-        #     if await self._check_if_complete_file_on_disk(download):
-        #         return False
-
-        #     self._tasks[task_id] = asyncio.create_task(self._download_file_coroutine(self._downloads[task_id]))
-
-        # return True
 
     async def pause_download(self, task_id: int) -> bool:
         """
@@ -253,16 +234,16 @@ class DownloadManager:
                 logging.debug(f"[DM] pause_download in parallel download, {self._task_pools=}")
                 if task_id not in self._task_pools:
                     return False
-                    # raise Exception("Error: task_id not in DownloadManager task pool list")
                 logging.debug(f"Attempting to stop tasks in {self._task_pools[task_id]}")
                 task_pool = self._task_pools[task_id]
                 for task in task_pool:
                     if not task.done():
+                        task.cancel()
                         try:
                             await task
                         except asyncio.CancelledError:
                             pass
-                    
+
                 del self._task_pools[download.task_id]
             else:
                 logging.debug("[DM] pause_download in single connection download")
@@ -280,6 +261,8 @@ class DownloadManager:
                     del self._tasks[task_id]
             return True
         except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
 
     async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
@@ -398,6 +381,8 @@ class DownloadManager:
 
         prev_bytes = None
 
+        if download.file_size_bytes is None or download.file_size_bytes == 0:
+            raise Exception("Parallel download requires Content-Length header")
         if download.file_size_bytes < ONE_GIBIB:
             increment = int(download.file_size_bytes // 4)
         else:
@@ -427,6 +412,7 @@ class DownloadManager:
         next_write_byte = 0
         end_bytes = 0
         active_time = timedelta()
+        chunk_time_delta = timedelta()
         while True:
             try:
                 start_bytes, end_bytes = self._data_queues[download.task_id].get_nowait()
@@ -454,18 +440,19 @@ class DownloadManager:
 
                             chunk_time_delta = datetime.now() - chunk_start_time
 
-                            active_time += datetime.now() - last_active_time_update 
+                            active_time += datetime.now() - last_active_time_update
                             last_active_time_update = datetime.now()
 
                             if (datetime.now() - last_running_update) > self._parallel_running_event_update_rate_seconds:
                                 last_running_update = datetime.now()
 
+                                chunk_time_seconds = chunk_time_delta.total_seconds()
                                 download.state = DownloadState.RUNNING
                                 await self.events_queue.put(DownloadEvent(
                                     task_id=download.task_id,
                                     state=download.state,
                                     output_file=download.output_file,
-                                    download_speed=len(chunk)/chunk_time_delta.total_seconds(),
+                                    download_speed=len(chunk)/chunk_time_seconds if chunk_time_seconds > 0 else 0,
                                     active_time=active_time,
                                     downloaded_bytes=download.downloaded_bytes,
                                     download_size_bytes=download.file_size_bytes,
@@ -486,14 +473,27 @@ class DownloadManager:
                 raise
             except asyncio.QueueEmpty:
                 logging.debug(f"Worker {worker_id} found no tasks, worker complete.")
+                download.state = DownloadState.COMPLETED
+                await self.events_queue.put(DownloadEvent(
+                    task_id=download.task_id,
+                    state= download.state,
+                    output_file=download.output_file,
+                    download_speed=0,
+                    active_time=active_time,
+                    downloaded_bytes=download.downloaded_bytes,
+                    download_size_bytes=download.file_size_bytes,
+                    worker_id=worker_id
+                ))
                 break
             except Exception as err:
                 # TODO Count worker errors and handle accordingly
                 # TODO Create a new worker and retry?
                 if next_write_byte != end_bytes:
                     self._data_queues[download.task_id].put_nowait((next_write_byte, end_bytes))
-                
+
                 logging.error(f"Worker {worker_id}, Error: {repr(err)}, {err}")
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
                 download.state = DownloadState.ERROR
                 await self.events_queue.put(DownloadEvent(
                     task_id=download.task_id,
@@ -503,18 +503,7 @@ class DownloadManager:
                     worker_id=worker_id
                 ))
                 return
-
-        download.state = DownloadState.COMPLETED
-        await self.events_queue.put(DownloadEvent(
-            task_id=download.task_id,
-            state= download.state,
-            output_file=download.output_file,
-            download_speed=0,
-            active_time=active_time,
-            downloaded_bytes=download.downloaded_bytes,
-            download_size_bytes=download.file_size_bytes,
-            worker_id=worker_id
-        ))
+        
 
     async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
         try:
@@ -532,6 +521,7 @@ class DownloadManager:
 
             last_running_update = datetime.now() - self._running_event_update_rate_seconds
             last_active_time_update = datetime.now()
+            chunk_time_delta = timedelta()
 
             async with self._session.get(download.url, headers=headers) as resp:
                 async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
@@ -554,11 +544,12 @@ class DownloadManager:
                     if (datetime.now() - last_running_update) > self._running_event_update_rate_seconds:
                         last_running_update = datetime.now()
                         download.state = DownloadState.RUNNING
+                        chunk_time_seconds = chunk_time_delta.total_seconds()
                         await self.events_queue.put(DownloadEvent(
                             task_id=download.task_id,
                             state=download.state,
                             output_file=download.output_file,
-                            download_speed=len(chunk)/chunk_time_delta.total_seconds(),
+                            download_speed=len(chunk)/chunk_time_seconds if chunk_time_seconds > 0 else 0,
                             active_time=download.active_time,
                             downloaded_bytes=download.downloaded_bytes,
                             download_size_bytes=download.file_size_bytes
@@ -585,10 +576,8 @@ class DownloadManager:
             ))
             raise
         except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
-        finally:
-            if download.task_id in self._tasks:
-                del self._tasks[download.task_id]
-
 
 __all__ = ["DownloadManager", "DownloadMetadata", "DownloadState", "DownloadEvent"]

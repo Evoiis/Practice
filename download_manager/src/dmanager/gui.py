@@ -6,6 +6,7 @@ from src.dmanager.core import DownloadManager, DownloadEvent, DownloadState, Dow
 import tkinter as tk
 from tkinter import ttk
 
+import traceback
 import logging
 
 ONE_MEBIBYTE = 1048576
@@ -59,6 +60,7 @@ class DownloadManagerGUI:
                 seconds %= 60
         
             return f"{int(hours)}:{int(minutes)}:{int(seconds)}"
+        return ""
 
     async def _read_event_loop(self):
         try:
@@ -75,7 +77,8 @@ class DownloadManagerGUI:
                         values = list(self.table.item(self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)], "values"))
 
                         values[1] = event.state.name
-                        values[5] = f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s"
+                        if event.download_speed is not None:
+                            values[5] = f"{round((event.download_speed / ONE_MEBIBYTE), 4)} MiB/s"
                         values[6] = event.error_string
                         values[7] = self._translate_active_time_to_string(event.active_time)
 
@@ -83,7 +86,7 @@ class DownloadManagerGUI:
                             self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)],
                             values=values
                         )
-                    else:
+                    elif event.download_speed is not None:                        
                         self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)] = self.table.insert(
                             self.task_id_to_table_row[event.task_id],
                             "end",
@@ -93,7 +96,7 @@ class DownloadManagerGUI:
                     values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
                     values[1] = event.state.name
                     values[3] = event.output_file
-                    if event.downloaded_bytes is not None and event.download_size_bytes is not None:
+                    if event.downloaded_bytes is not None and event.download_size_bytes is not None and event.download_size_bytes > 0:
                         values[4] = f"{round(event.downloaded_bytes/ONE_MEBIBYTE, 4)} MiB / {round(event.download_size_bytes/ONE_MEBIBYTE, 4)} MiB ({round(100*event.downloaded_bytes/event.download_size_bytes, 2)})"
 
                     self.table.item(
@@ -106,7 +109,7 @@ class DownloadManagerGUI:
                     values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
                     values[1] = event.state.name
                     values[3] = event.output_file
-                    if event.downloaded_bytes is not None and event.download_size_bytes is not None:
+                    if event.downloaded_bytes is not None and event.download_size_bytes is not None and event.download_size_bytes > 0:
                         values[4] = f"{round(event.downloaded_bytes/ONE_MEBIBYTE, 4)} MiB / {round(event.download_size_bytes/ONE_MEBIBYTE, 4)} MiB ({round(100*event.downloaded_bytes/event.download_size_bytes, 2)})"
                     if event.download_speed is not None:
                         values[5] = f"{round((event.download_speed / (ONE_MEBIBYTE)), 4)} MiB/s"
@@ -118,6 +121,8 @@ class DownloadManagerGUI:
                         values=values
                     )
         except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
             logging.error(f"{repr(err)}, {err}")
         self.root.after(self.event_poll_rate, self._add_read_event_loop_to_async_thread)
 
