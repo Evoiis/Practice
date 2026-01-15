@@ -337,7 +337,7 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
     await dm.shutdown()
 
 @pytest.mark.asyncio
-async def test_core_file_preallocation(async_thread_runner, create_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
+async def test_core_file_preallocation(test_file_setup_and_cleanup):
 
     n_workers = 4
     dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)

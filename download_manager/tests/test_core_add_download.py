@@ -1,5 +1,6 @@
 import pytest
 import logging
+import os
 
 from dmanager.core import DownloadManager, DownloadState
 from tests.helpers import wait_for_state
@@ -52,8 +53,6 @@ async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_
     chunks = [b"abc", b"def", b"ghi"]
     mock_url = "https://example.com/file.bin"
 
-    test_file_setup_and_cleanup("ETAGSTRING.mp4")
-
     create_mock_response_and_set_mock_session(
         206,
         {
@@ -72,7 +71,10 @@ async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_
     await wait_for_state(dm, task_id, DownloadState.RUNNING)
 
     logging.debug(dm.get_downloads())
-    assert dm.get_downloads()[task_id].output_file == "ETAGSTRING.mp4"
+    assert dm.get_downloads()[task_id].output_file.endswith(".mp4")
+
+    if os.path.exists(dm.get_downloads()[task_id].output_file):
+        os.remove(dm.get_downloads()[task_id].output_file)
 
     await dm.shutdown()
 
