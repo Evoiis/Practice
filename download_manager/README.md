@@ -7,16 +7,18 @@ A simple python download manager for windows.
 
 ### Implemented:
 - Asynchronous downloads using aioHTTP
-- Download controls: Start/Resume/Pausing/Delete
-- Test Suite
-- Simple TKinter GUI to add, control, and check progress of downloads
+- Download Manager controls: Start/Resume/Pause/Delete
+- Download Manager Test Suite
+- Simple Stateless GUI to add, control, and check progress of downloads
+- Single File Parallel Download
+    - Using multiple connections to download one file faster
 
 
-### Planned:
-# TODO: Save metadata to file: Persist preferences and download_metadata between restarts
-Let user override number of parallel workers?
-# TODO: Support default download folder
-# TODO: Output file auto naming rework?
+### Download Metadata & Preferences:
+- Save metadata to file: Persist preferences and download_metadata between restarts
+- Support default download folder
+- Let user override number of parallel workers
+- Output file auto naming rework?
 
 
 ### Possible Extensions (Not included to avoid scope creep):
