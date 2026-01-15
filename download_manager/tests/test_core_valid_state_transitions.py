@@ -434,8 +434,6 @@ async def test_two_mb_download(async_thread_runner, test_file_setup_and_cleanup,
     await dm.shutdown()
 
 
-
-
 @pytest.mark.asyncio
 async def test_two_mb_download_no_http_ranges(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
     two_mb = b"a" * (2 * 1024 * 1024)
@@ -463,5 +461,71 @@ async def test_two_mb_download_no_http_ranges(async_thread_runner, test_file_set
     await wait_for_state(dm, task_id, DownloadState.COMPLETED)
 
     verify_file(mock_file_name, "a" * (2 * 1024 * 1024))
+
+    await dm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delete_and_redownload_same_file(
+    async_thread_runner,
+    test_file_setup_and_cleanup,
+    create_mock_response_and_set_mock_session,
+):
+    # --- Setup ---
+    chunks = [b"abc", b"def", b"ghi"]
+    expected_content = b"".join(chunks)
+
+    mock_url = "https://example.com/file.bin"
+    mock_file_name = "test_file.bin"
+    test_file_setup_and_cleanup(mock_file_name)
+
+    # First mock response
+    mock_response = create_mock_response_and_set_mock_session(
+        206,
+        {
+            "Content-Length": str(len(expected_content)),
+            "Accept-Ranges": "bytes",
+        },
+        mock_url,
+    )
+
+    dm = DownloadManager()
+
+    # --- First download ---
+    task_id = dm.add_download(mock_url, mock_file_name)
+    async_thread_runner.submit(dm.start_download(task_id))
+
+    for chunk in chunks:
+        await mock_response.insert_chunk(chunk)
+    mock_response.end_response()
+
+    await wait_for_state(dm, task_id, DownloadState.RUNNING)
+    await wait_for_state(dm, task_id, DownloadState.COMPLETED)
+
+    
+    wait_for_file_to_be_created(mock_file_name)
+    verify_file(mock_file_name, expected_content.decode())
+
+    await dm.delete_download(task_id, remove_file=True)
+
+    await wait_for_state(dm, task_id, DownloadState.DELETED)
+    assert task_id not in dm._tasks
+    assert task_id not in dm._downloads
+    assert not os.path.exists(mock_file_name)
+
+    # --- Re-add and re-download ---
+    task_id_2 = dm.add_download(mock_url, mock_file_name)
+    async_thread_runner.submit(dm.start_download(task_id_2))
+
+    for chunk in chunks:
+        await mock_response.insert_chunk(chunk)
+    mock_response.end_response()
+
+    await wait_for_state(dm, task_id_2, DownloadState.RUNNING)
+    await wait_for_state(dm, task_id_2, DownloadState.COMPLETED)
+
+    # --- Verify again ---
+    wait_for_file_to_be_created(mock_file_name)
+    verify_file(mock_file_name, expected_content.decode())
 
     await dm.shutdown()

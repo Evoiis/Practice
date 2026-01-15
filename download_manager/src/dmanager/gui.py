@@ -69,10 +69,8 @@ class DownloadManagerGUI:
             if event is not None:
                 logging.debug(event)
                 if event.state == DownloadState.DELETED:
-                    self.table.delete(self.task_id_to_table_row[event.task_id])
-                    return 
-                
-                if event.worker_id is not None:
+                    self.table.delete(self.task_id_to_table_row[event.task_id])                
+                elif event.worker_id is not None:
                     if (event.task_id, event.worker_id) in self.task_id_and_worker_id_to_table_row:
                         values = list(self.table.item(self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)], "values"))
 
@@ -104,7 +102,6 @@ class DownloadManagerGUI:
                         values=values
                     )
 
-                    pass
                 else:
                     values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
                     values[1] = event.state.name
@@ -120,6 +117,7 @@ class DownloadManagerGUI:
                         self.task_id_to_table_row[event.task_id],
                         values=values
                     )
+
         except Exception as err:
             tb = traceback.format_exc()
             logging.error(f"Traceback: {tb}")
