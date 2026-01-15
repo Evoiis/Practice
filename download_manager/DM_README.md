@@ -13,18 +13,20 @@ A simple python download manager for windows.
 
 
 ### Planned:
-- Parallel downloads for large files
-    - And new test for parallel downloads
-- Save metadata to file: Persist preferences and download_metadata between restarts
-    - Support default download folder
+# TODO: Save metadata to file: Persist preferences and download_metadata between restarts
+Let user override number of parallel workers?
+# TODO: Support default download folder
+# TODO: Output file auto naming rework?
 
-### Possible Extensions:
+
+### Possible Extensions (Not included to avoid scope creep):
 - Auto-shutdown/Keep-on Computer Logic
+- Download Speed limiter
 
 # Usage
 
 ### App
-
+`python main.py`
 
 ### Tests
 

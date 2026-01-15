@@ -4,7 +4,8 @@ import logging
 from dmanager.core import DownloadManager, DownloadState
 from tests.helpers import wait_for_state
 
-def test_add_download():
+@pytest.mark.asyncio
+async def test_add_download():
     dm = DownloadManager()
     mock_url = "https://example.com/file.bin"
     mock_file_name = "test_file.bin"
@@ -16,7 +17,7 @@ def test_add_download():
     assert download_metadata.url == mock_url
     assert download_metadata.output_file == mock_file_name
 
-    dm.shutdown()
+    await dm.shutdown()
 
 @pytest.mark.asyncio
 async def test_output_file_with_invalid_characters():
@@ -43,16 +44,15 @@ async def test_output_file_with_invalid_characters():
         assert download_metadata.url == mock_url
         assert download_metadata.output_file == fixed_name, f"Failed to change invalid file name to fixed file name. Received: {invalid_name}, Expected: {fixed_name}"
 
-    dm.shutdown()
+    await dm.shutdown()
     
 
 @pytest.mark.asyncio
 async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_runner, create_mock_response_and_set_mock_session):
-    logging.debug("Prepare mock session and response")
     chunks = [b"abc", b"def", b"ghi"]
     mock_url = "https://example.com/file.bin"
 
-    # test_file_setup_and_cleanup("")
+    test_file_setup_and_cleanup("ETAGSTRING.mp4")
 
     create_mock_response_and_set_mock_session(
         206,
@@ -74,12 +74,11 @@ async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_
     logging.debug(dm.get_downloads())
     assert dm.get_downloads()[task_id].output_file == "ETAGSTRING.mp4"
 
-    dm.shutdown()
+    await dm.shutdown()
 
 
 @pytest.mark.asyncio
 async def test_input_invalid_url(async_thread_runner):
-    logging.debug("Prepare mock session and response")
     invalid_url = "http://exa mple.com"
     # mock_file_name = "test_file.bin"
     # test_file_setup_and_cleanup(mock_file_name)
@@ -89,10 +88,10 @@ async def test_input_invalid_url(async_thread_runner):
     task_id = dm.add_download(invalid_url, "")
     future = async_thread_runner.submit(dm.start_download(task_id))
 
-    assert not future.result()    
+    assert not future.result()
     await wait_for_state(dm, task_id, DownloadState.ERROR)
 
-    dm.shutdown()
+    await dm.shutdown()
     
 
 @pytest.mark.asyncio
@@ -119,25 +118,20 @@ async def test_input_already_used_output_file():
     assert download_metadata.url == mock_url_2
     assert download_metadata.output_file == ""
 
-    dm.shutdown()
+    await dm.shutdown()
 
 @pytest.mark.asyncio
 async def test_invalid_test_id(async_thread_runner):
-    # chunks = ["invalid chunk because a bytes-like object is required :)"]
-    # mock_url = "https://example.com/file.bin"
-    # mock_file_name = "test_file.bin"
-
     invalid_task_id = 50
 
     dm = DownloadManager()
-    # task_id = dm.add_download(mock_url, mock_file_name)
     future = async_thread_runner.submit(dm.start_download(invalid_task_id))
     assert future.result() is False
     
-    assert await dm.resume_download(invalid_task_id) is False
+    assert await dm.start_download(invalid_task_id) is False
 
     assert await dm.delete_download(invalid_task_id) is False
 
     assert await dm.pause_download(invalid_task_id) is False
 
-    dm.shutdown()    
+    await dm.shutdown()    

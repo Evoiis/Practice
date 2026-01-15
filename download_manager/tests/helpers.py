@@ -3,6 +3,10 @@ import time
 import os
 import logging
 
+from typing import Dict, Tuple
+
+from dmanager.core import DownloadState
+
 DEFAULT_TIMEOUT = 20
 
 async def wait_for_state(dm, task_id, expected_state, timeout_sec=DEFAULT_TIMEOUT):
@@ -13,11 +17,28 @@ async def wait_for_state(dm, task_id, expected_state, timeout_sec=DEFAULT_TIMEOU
         event = await dm.get_oldest_event()
         if event:
             logging.debug(f"Event received: {event}")
-        if event and event.task_id == task_id and event.state == expected_state:
-            return event
-
-        await asyncio.sleep(1)
+            if event.task_id == task_id and event.state == expected_state:
+                return event
+        else:
+            await asyncio.sleep(1)
     raise AssertionError(f"Timed out while waiting for {task_id=} to reach {expected_state}.")
+
+async def wait_for_multiple_states(dm, states: Dict[Tuple[int, DownloadState], int], timeout_sec=DEFAULT_TIMEOUT):
+    for _ in range(timeout_sec):
+        event = await dm.get_oldest_event()
+        if event:
+            logging.debug(f"Event received: {event}")
+
+            if (event.task_id, event.state) in states:
+                states[(event.task_id, event.state)] -= 1
+                if states[(event.task_id, event.state)] == 0:
+                    del states[(event.task_id, event.state)]
+
+                if len(states) == 0:
+                    return
+        else:
+            await asyncio.sleep(1)
+    raise AssertionError(f"Timed out while waiting for states to be reached. {states=}")
 
 def wait_for_file_to_be_created(file_name, timeout_sec=DEFAULT_TIMEOUT):
 
