@@ -16,10 +16,6 @@ ONE_GIBIB = 1073741824
 ONE_MEBIBYTE = 1048576
 KIBIBYTE_256 = 262144
 
-# TODO: Support default download folder
-# TODO: Save metadata to file: Persist preferences and download_metadata between restarts
-
-
 class DownloadState(Enum):
     PAUSED = 0
     RUNNING = 1
@@ -88,6 +84,9 @@ class DownloadManager:
         return self._next_id
     
     async def _log_and_share_error_event(self, download: DownloadMetadata, err: Exception):
+        """
+        Log error and emit ERROR Download Event.
+        """
         logging.error(f"{repr(err)}, {err}")
         download.state = DownloadState.ERROR
         await self.events_queue.put(DownloadEvent(
@@ -119,7 +118,8 @@ class DownloadManager:
 
     async def get_oldest_event(self) -> Optional[DownloadEvent]:
         """
-        Pops the oldest event from the queue if the queue is not empty
+        Retrieve and remove the oldest event from the event queue.
+        If the queue is empty, this method returns None.
         """
         if self.events_queue.empty():
             return None
@@ -127,6 +127,16 @@ class DownloadManager:
             return self.events_queue.get_nowait()            
 
     def add_download(self, url: str, output_file: Optional[str] = "") -> int:
+        """
+        Register a new download task.
+
+        - Generates a unique task ID
+        - Sanitizes and validates the output file name
+        - Creates initial DownloadMetadata in PENDING state
+
+        Returns:
+            int: unique task id
+        """
         id = self._iterate_and_get_id()
 
         for download in self._downloads.values():
@@ -143,10 +153,20 @@ class DownloadManager:
 
     async def start_download(self, task_id: int, use_parallel_download: bool = None) -> bool:
         """
-        Wraps download coroutine into task to start the download
+        Start or restart a download task.
 
-        :param task_id: Integer identifier for task
-        :param use_parallel_download: Explicit option to disable/enable parallel download
+        - Initializes the aiohttp session if needed
+        - Validates task state
+        - Fetches and validates HTTP headers
+        - Decides between single or parallel download mode
+        - Launches the appropriate download coroutine
+
+        Args:
+            task_id (int): ID of the download task.
+            use_parallel_download (Optional[bool]): Force enable/disable parallel downloads.
+
+        Returns:
+            bool: True if the download was started successfully, False otherwise.
         """
 
         if not self._session:
@@ -191,6 +211,17 @@ class DownloadManager:
         return True
 
     async def _run_parallel_connection_download(self, download: DownloadMetadata):
+        """
+        Start a parallel download using multiple worker tasks.
+
+        - Checks if the file is already complete on disk
+        - Preallocates disk space if required
+        - Creates a pool of worker tasks to download file ranges
+
+        Args:
+            download (DownloadMetadata): The download to process.
+        """
+
         if await self._check_if_complete_file_on_disk(download):
             if download.task_id in self._data_queues and self._data_queues[download.task_id].empty():
                 logging.debug("Found file in directory and download queues are empty. Marking download as complete.")
@@ -224,8 +255,14 @@ class DownloadManager:
             tb = traceback.format_exc()
             logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
-    
+
     async def _preallocate_file_space_on_disk(self, download: DownloadMetadata):
+        """
+        Preallocate disk space for a download file.
+
+        - writes zero bytes to disk to ensure the full file size is allocated before parallel downloads begin
+        """
+
         download.state = DownloadState.ALLOCATING_SPACE
         await self.events_queue.put(DownloadEvent(
             task_id=download.task_id,
@@ -247,6 +284,15 @@ class DownloadManager:
 
 
     async def _run_single_connection_download(self, download:DownloadMetadata):
+        """
+        Start a single-connection download.
+
+        This method:
+        - Resumes from existing file size if present
+        - Checks if the file is already complete
+        - Launches a single download coroutine
+        """
+
         download.downloaded_bytes = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
         if await self._check_if_complete_file_on_disk(download):
             download.state = DownloadState.COMPLETED
@@ -261,11 +307,12 @@ class DownloadManager:
 
     async def pause_download(self, task_id: int) -> bool:
         """
-        Pauses a download if it is running
-        Removes task from _tasks
+        Pause an active download or preallocation task.
 
-        :param task_id: Identifies which task to pause
+        - Cancels active tasks or worker pools
+        - Updates download state to PAUSED and emits Paused DownloadState
         """
+
         try:
             logging.debug("[DM] pause_download called")
             if task_id not in self._downloads:
@@ -330,10 +377,21 @@ class DownloadManager:
 
     async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
         """
-        Removes download from _downloads and pauses the download if it is currently running
+        Delete a download task and optionally remove its file.
 
-        :param remove_file: Whether or not to delete the output file
+        This method:
+        - Pauses the download if running
+        - Removes all internal task references
+        - Emits a DELETED event
+
+        Args:
+            task_id (int): ID of the download to delete.
+            remove_file (bool): Whether to delete the downloaded file.
+
+        Returns:
+            bool: True if deletion was successful, False otherwise.
         """
+
         try:
             logging.debug("delete_download called")
             if task_id not in self._downloads:
@@ -375,12 +433,13 @@ class DownloadManager:
 
     async def _check_download_headers(self, download: DownloadMetadata):
         """
-        Parses headers from server
+        Fetch and validate HTTP headers for a download.
 
-        - Collects ETag, Content-Length, Content-Type, Accept-Ranges to fill download metadata accordingly
-
-        - Verifies ETag and Content-Length still match download metadata
-            - Deletes already downloaded data if they no longer match the response from the server
+        This method:
+        - Retrieves ETag, Content-Length, Accept-Ranges, Content-Type
+        - Detects server-side changes to file size or ETag
+        - Resets local file state if changes are detected
+        - Generates an output filename if none is provided
         """
 
         async with self._session.head(download.url) as resp:
@@ -408,20 +467,30 @@ class DownloadManager:
                 download.server_supports_http_range = resp.headers["Accept-Ranges"] == "bytes"
             
             if download.output_file == "":
-                if "ETag" in resp.headers:
-                    download.output_file = resp.headers["ETag"][1:-1] + guess_extension(resp.headers.get("Content-Type", ".file"))
-                else:
-                    download.output_file = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-                    if "Content-Type" in resp.headers:
-                        guess_file_extension = guess_extension(resp.headers["Content-Type"])
-                        if guess_file_extension is None:
-                            download.output_file += ".file"
-                        else:
-                            download.output_file += guess_file_extension
-                    else:
+                download.output_file = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+                if "Content-Type" in resp.headers:
+                    guess_file_extension = guess_extension(resp.headers["Content-Type"])
+                    if guess_file_extension is None:
                         download.output_file += ".file"
+                    else:
+                        download.output_file += guess_file_extension
+                else:
+                    download.output_file += ".file"
     
     async def _check_if_complete_file_on_disk(self, download: DownloadMetadata):
+        """
+        Check whether the downloaded file is already complete.
+
+        - Compares file size on disk to expected Content-Length
+        - Emits an error if an oversized file exists
+
+        Returns:
+            bool: True if the file is complete, False otherwise.
+
+        Raises:
+            Exception: If an oversized conflicting file exists.
+        """
+
         output_file_size = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
         if output_file_size != 0:
             if output_file_size == download.file_size_bytes:
@@ -440,7 +509,19 @@ class DownloadManager:
         return False
 
     
-    async def _create_task_pool(self, download: DownloadMetadata):
+    async def _create_task_pool(self, download: DownloadMetadata): 
+        """
+        Create worker tasks for parallel downloads.
+
+        This method:
+        - Splits the file into byte ranges
+        - Enqueues ranges into a shared queue
+        - Spawns worker tasks to process the ranges
+
+        Args:
+            download (DownloadMetadata): The download to parallelize.
+        """
+
         task_id = download.task_id
         self._task_pools[task_id] = []
 
@@ -474,6 +555,19 @@ class DownloadManager:
             
 
     async def _parallel_download_coroutine(self, download: DownloadMetadata, worker_id) -> None:
+        """
+        Worker coroutine for parallel downloads.
+
+        - Fetches byte ranges from a shared queue
+        - Downloads and writes file chunks
+        - Reports progress events
+        - Handles cancellation and error recovery
+
+        Args:
+            download (DownloadMetadata): The associated download.
+            worker_id (int): Worker identifier.
+        """
+
         logging.debug(f"Task {download.task_id}, Worker {worker_id} initialized.")
         next_write_byte = 0
         end_bytes = 0
@@ -572,6 +666,19 @@ class DownloadManager:
         
 
     async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
+        """
+        Single-connection download coroutine.
+
+        This method:
+        - Performs sequential HTTP downloads
+        - Supports resume via HTTP Range headers
+        - Emits periodic progress events
+        - Handles cancellation and completion events
+
+        Args:
+            download (DownloadMetadata): The download to process.
+        """
+
         try:
             headers = {}
 

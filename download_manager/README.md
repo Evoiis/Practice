@@ -14,16 +14,13 @@ A simple python download manager for windows.
     - Using multiple connections to download one file faster
 
 
-### Download Metadata & Preferences:
-- Save metadata to file: Persist preferences and download_metadata between restarts
-- Support default download folder
-- Let user override number of parallel workers
-- Output file auto naming rework?
-
-
 ### Possible Extensions (Not included to avoid scope creep):
 - Auto-shutdown/Keep-on Computer Logic
 - Download Speed limiter
+- Save metadata to file: Persist preferences and download_metadata between restarts
+- GUI Elements to edit preferences
+    - Let user override number of parallel workers
+    - Support default download folder
 
 # Usage
 
