@@ -57,7 +57,7 @@ class DownloadMetadata:
     state: DownloadState = DownloadState.PENDING
     server_supports_http_range: bool = False
     use_parallel_download: bool = None
-    worker_states: Optional[Dict[int: DownloadState]] = None
+    worker_states: Optional[Dict[int, int]] = None
 
 
 class DownloadManager:
