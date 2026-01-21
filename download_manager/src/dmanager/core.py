@@ -46,7 +46,7 @@ class DownloadEvent:
         self.time = datetime.now()
 
 @dataclass
-class DownloadMetadata:``
+class DownloadMetadata:
     task_id: int
     url: str
     output_file: str
