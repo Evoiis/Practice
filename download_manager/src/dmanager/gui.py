@@ -10,6 +10,7 @@ import traceback
 import logging
 
 ONE_MEBIBYTE = 1048576
+ERROR_COL_WIDTH = 200
 
 class DownloadManagerGUI:
 
@@ -23,10 +24,12 @@ class DownloadManagerGUI:
         self.url_input_element = None
         self.file_name_input_element = None
         self.table = None
+
         self.task_id_to_table_row = dict()
         self.task_id_and_worker_id_to_table_row = dict()
         self.root = tk.Tk()
         self.download_data: Dict[int: DownloadMetadata] = dict()
+        self.last_event = None
 
         self._generate_gui_base_elements()
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
@@ -61,6 +64,11 @@ class DownloadManagerGUI:
         
             return f"{int(hours)}:{int(minutes)}:{int(seconds)}"
         return ""
+    
+    @staticmethod
+    def _wrap_text(text, width):
+        n_characters = int(width * 0.2)
+        return "\n".join([text[i:i+(n_characters)] for i in range(0, len(text), int(n_characters))])
 
     async def _read_event_loop(self):
         try:
@@ -77,6 +85,8 @@ class DownloadManagerGUI:
 
     def _update_gui_with_event(self, event):
         """Update GUI widgets with event data."""
+        if event.error_string:
+            event.error_string = self._wrap_text(event.error_string, ERROR_COL_WIDTH)
         if event.state == DownloadState.DELETED:
             self.table.delete(self.task_id_to_table_row[event.task_id])
         elif event.worker_id is not None:
@@ -101,7 +111,9 @@ class DownloadManagerGUI:
                 )
 
             values = list(self.table.item(self.task_id_to_table_row[event.task_id], "values"))
-            values[1] = event.state.name
+            
+            if event.state not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
+                values[1] = event.state.name
             values[3] = event.output_file
             if event.downloaded_bytes is not None and event.download_size_bytes is not None and event.download_size_bytes > 0:
                 values[4] = f"{round(event.downloaded_bytes/ONE_MEBIBYTE, 4)} MiB / {round(event.download_size_bytes/ONE_MEBIBYTE, 4)} MiB ({round(100*event.downloaded_bytes/event.download_size_bytes, 2)}%)"
@@ -185,7 +197,7 @@ class DownloadManagerGUI:
         self._center_over_parent(popup, self.root)
 
     
-    def _on_table_cell_click(self, event):
+    def _on_table_cell_left_click(self, event):
         row = self.table.identify_row(event.y)
         column = self.table.identify_column(event.x)
 
@@ -205,6 +217,15 @@ class DownloadManagerGUI:
             task_id = self.table.item(row, "values")[0]
             self._delete_pop_up(task_id)
 
+    def _copy_cell(self):
+        item_id = self.table.focus()
+        column = self.table.identify_column(self.last_event.x)
+        if not item_id or not column:
+            return
+        col_index = int(column.replace("#","")) - 1
+        value = self.table.item(item_id, "values")[col_index]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
 
     def _generate_gui_base_elements(self):
         # First Row, User Input
@@ -235,6 +256,9 @@ class DownloadManagerGUI:
         ).grid(row=0, column=6, padx=5)
 
         # Table
+        style = ttk.Style()
+        style.configure("Treeview", rowheight=50)
+
         table_columns = ("Task ID", "Download State", "URL", "Output File", "Downloaded / Total Size (%)", "Current Download Speed", "Error", "Active Time (H:M:S)", "", "", "")
         self.table = ttk.Treeview(
             self.root,
@@ -243,7 +267,15 @@ class DownloadManagerGUI:
         )
         self.table.grid(row=1, column=0, columnspan=10, sticky="nsew")
 
-        self.table.bind("<Button-1>", self._on_table_cell_click)
+        self.table.bind("<Button-1>", self._on_table_cell_left_click)
+
+        right_click_menu = tk.Menu(self.root, tearoff=0)
+        right_click_menu.add_command(label="Copy", command=self._copy_cell)
+        def on_right_click(event):
+            self.last_event = event
+            right_click_menu.tk_popup(event.x_root, event.y_root)
+        self.table.bind("<Button-3>", on_right_click)
+
 
         for column in table_columns:
             self.table.heading(column, text=column)
@@ -255,6 +287,8 @@ class DownloadManagerGUI:
                 self.table.column(column, width=200)
             elif column == "Downloaded / Total Size (%)":
                 self.table.column(column, width=200)
+            elif column == "Error":
+                self.table.column(column, width=ERROR_COL_WIDTH)
             else:
                 self.table.column(column, width=150)
         

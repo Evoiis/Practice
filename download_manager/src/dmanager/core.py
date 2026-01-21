@@ -15,7 +15,8 @@ import traceback
 
 ONE_GIBIBYTE = 1073741824
 ONE_MEBIBYTE = 1048576
-KIBIBYTE_256 = 262144
+ONE_KIBIBYTE = 1024
+KIBIBYTE_256 = 256 * 1024
 
 class DownloadState(Enum):
     PAUSED = 0
@@ -56,6 +57,7 @@ class DownloadMetadata:
     state: DownloadState = DownloadState.PENDING
     server_supports_http_range: bool = False
     use_parallel_download: bool = None
+    worker_states: Dict[int: DownloadState] = None
 
 
 class DownloadManager:
@@ -203,7 +205,7 @@ class DownloadManager:
             if (download.file_size_bytes > ONE_GIBIBYTE and use_parallel_download is None) or use_parallel_download is True:
                 download.use_parallel_download = True
 
-            # If the server doesn't have htttp range support or didn't provide Content-Length then we can't use parallel download
+            # If the server doesn't have http range support or didn't provide Content-Length then we can't use parallel download
             if not download.server_supports_http_range or download.file_size_bytes is None or use_parallel_download is False:
                 download.use_parallel_download = False
 
@@ -373,6 +375,7 @@ class DownloadManager:
                 
                 if task_id in self._tasks:
                     del self._tasks[task_id]
+
             return True
         except Exception as err:
             tb = traceback.format_exc()
@@ -527,6 +530,7 @@ class DownloadManager:
 
         task_id = download.task_id
         self._task_pools[task_id] = []
+        download.worker_states = dict()
 
         if task_id not in self._data_queues:
             self._data_queues[task_id] = asyncio.Queue()
@@ -554,6 +558,7 @@ class DownloadManager:
 
         logging.debug(f"Starting {n_workers=}")
         for n in range(n_workers):
+            download.worker_states[n] = DownloadState.PENDING
             self._task_pools[task_id].append(
                 asyncio.create_task(self._parallel_download_coroutine(
                     download,
@@ -616,6 +621,7 @@ class DownloadManager:
 
                                 chunk_time_seconds = chunk_time_delta.total_seconds()
                                 download.state = DownloadState.RUNNING
+                                download.worker_states[worker_id] = DownloadState.RUNNING
                                 self.events_queue.put_nowait(DownloadEvent(
                                     task_id=download.task_id,
                                     state=download.state,
@@ -631,21 +637,36 @@ class DownloadManager:
                 if next_write_byte != end_bytes:
                     self._data_queues[download.task_id].put_nowait((next_write_byte, end_bytes))
 
-                download.state = DownloadState.PAUSED
+                download.worker_states[worker_id] = DownloadState.PAUSED
                 self.events_queue.put_nowait(DownloadEvent(
                     task_id=download.task_id,
-                    state= download.state,
+                    state=download.worker_states[worker_id],
                     output_file=download.output_file,
                     worker_id=worker_id,
                     active_time=active_time
                 ))
+
+                flag = True
+                for worker in download.worker_states:
+                    if download.worker_states[worker] not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
+                        flag = False
+                        break
+                
+                if flag:
+                    download.state = DownloadState.PAUSED
+                    self.events_queue.put_nowait(DownloadEvent(
+                        task_id=download.task_id,
+                        state=download.state,
+                        output_file=download.output_file,
+                    ))
                 raise
             except asyncio.QueueEmpty:
                 logging.debug(f"Worker {worker_id} found no tasks, worker complete.")
-                download.state = DownloadState.COMPLETED
+                
+                download.worker_states[worker_id] = DownloadState.COMPLETED
                 self.events_queue.put_nowait(DownloadEvent(
                     task_id=download.task_id,
-                    state= download.state,
+                    state=download.worker_states[worker_id],
                     output_file=download.output_file,
                     download_speed=0,
                     active_time=active_time,
@@ -653,7 +674,22 @@ class DownloadManager:
                     download_size_bytes=download.file_size_bytes,
                     worker_id=worker_id
                 ))
-                break
+
+                flag = True
+                for worker in download.worker_states:
+                    if download.worker_states[worker] != DownloadState.COMPLETED:
+                        flag = False
+                        break
+
+                if flag:
+                    download.state = DownloadState.COMPLETED
+                    self.events_queue.put_nowait(DownloadEvent(
+                        task_id=download.task_id,
+                        state=download.state,
+                        output_file=download.output_file,
+                    ))
+                    del self._task_pools[download.task_id]
+                return
             except Exception as err:
                 if next_write_byte != end_bytes:
                     self._data_queues[download.task_id].put_nowait((next_write_byte, end_bytes))
