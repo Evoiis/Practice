@@ -20,17 +20,20 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
+    RANGE_SIZE = 1048576
+
     data = {
-        "25": list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50": list(b"ghijkghijkghijkghijkghijk"),
-        "75": list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"a" * RANGE_SIZE ),
+        "2097152":  list(b"b" * RANGE_SIZE ),
+        "3145728":  list(b"c" * RANGE_SIZE ),
+        "4194304": list(b"d" * RANGE_SIZE)
     }
+
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 100,
+            "Content-Length": 4194304,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -39,7 +42,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, 25)
+        mock_response.set_range_end_n_send(key, RANGE_SIZE)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -55,6 +58,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
         mock_file_name,
         "".join(bytes(x).decode('ascii') for x in data.values())
     )
+
     
     await dm.shutdown()
 
@@ -70,16 +74,16 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
 
     
     data = {
-        "25":  list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50":  list(b"ghijkghijkghijkghijkghijk"),
-        "75":  list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"abcdeabcdeabcdeabcdeabcde"),
+        "2097152":  list(b"ghijkghijkghijkghijkghijk"),
+        "3145728":  list(b"mnopqmnopqmnopqmnopqmnopq"),
+        "4194304": list(b"asdfeasdfeasdfeasdfeasdfe")
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 100,
+            "Content-Length": 4194304,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -114,18 +118,18 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    
+    RANGE_SIZE = 1048576
     data = {
-        "25":  list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50":  list(b"ghijkghijkghijkghijkghijk"),
-        "75":  list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"a" * RANGE_SIZE ),
+        "2097152":  list(b"b" * RANGE_SIZE ),
+        "3145728":  list(b"c" * RANGE_SIZE ),
+        "4194304": list(b"d" * RANGE_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 100,
+            "Content-Length": 4194304,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -134,7 +138,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, 12)
+        mock_response.set_range_end_n_send(key, RANGE_SIZE//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -152,7 +156,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     async_thread_runner.submit(dm.start_download(task_id, use_parallel_download=True))
 
     for key in data:
-        mock_response.set_range_end_n_send(key, 25)
+        mock_response.set_range_end_n_send(key, RANGE_SIZE)
         mock_response.set_range_end_done(key)
 
     for _ in range(n_workers):
@@ -177,17 +181,18 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     test_file_setup_and_cleanup(mock_file_name)
 
     
+    RANGE_SIZE = 1048576
     data = {
-        "25":  list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50":  list(b"ghijkghijkghijkghijkghijk"),
-        "75":  list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"a" * RANGE_SIZE),
+        "2097152":  list(b"b" * RANGE_SIZE),
+        "3145728":  list(b"c" * RANGE_SIZE),
+        "4194304": list(b"d" * RANGE_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 100,
+            "Content-Length": 4194304,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -196,7 +201,7 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, 12)
+        mock_response.set_range_end_n_send(key, RANGE_SIZE//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -224,17 +229,18 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     test_file_setup_and_cleanup(mock_file_name)
 
     
+    RANGE_SIZE = 1048576
     data = {
-        "25":  list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50":  list(b"ghijkghijkghijkghijkghijk"),
-        "75":  list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"a" * RANGE_SIZE),
+        "2097152":  list(b"b" * RANGE_SIZE),
+        "3145728":  list(b"c" * RANGE_SIZE),
+        "4194304": list(b"d" * RANGE_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 100,
+            "Content-Length": 4194304,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -243,7 +249,7 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, 25)
+        mock_response.set_range_end_n_send(key, RANGE_SIZE)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -279,31 +285,32 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
     mock_file_name_2 = "test_file_2.txt"
     test_multiple_file_setup_and_cleanup([mock_file_name, mock_file_name_2])
 
+    RANGE_SIZE = 1048576
     data = {
-        "25":  list(b"abcdeabcdeabcdeabcdeabcde"),
-        "50":  list(b"ghijkghijkghijkghijkghijk"),
-        "75":  list(b"mnopqmnopqmnopqmnopqmnopq"),
-        "100": list(b"asdfeasdfeasdfeasdfeasdfe")
+        "1048576":  list(b"a" * RANGE_SIZE),
+        "2097152":  list(b"b" * RANGE_SIZE),
+        "3145728":  list(b"c" * RANGE_SIZE),
+        "4194304": list(b"d" * RANGE_SIZE)
     }
 
     mock_responses = create_multiple_parallel_mock_response_and_mock_sessions({
         mock_url: {
             "status": 206,
-            "headers": {"Content-Length": 100, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4194304, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
         mock_url_2: {
             "status": 206,
-            "headers": {"Content-Length": 100, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4194304, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
     })
 
     for key in data:
-        mock_responses[mock_url].set_range_end_n_send(key, 25)
-        mock_responses[mock_url_2].set_range_end_n_send(key, 25)
+        mock_responses[mock_url].set_range_end_n_send(key, RANGE_SIZE)
+        mock_responses[mock_url_2].set_range_end_n_send(key, RANGE_SIZE)
         mock_responses[mock_url].set_range_end_done(key)
         mock_responses[mock_url_2].set_range_end_done(key)
     

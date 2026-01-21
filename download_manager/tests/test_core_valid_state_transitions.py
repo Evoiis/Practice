@@ -451,7 +451,7 @@ async def test_two_mib_download_no_http_ranges(async_thread_runner, test_file_se
 
     dm = DownloadManager()
     task_id = dm.add_download(mock_url, mock_file_name)
-    future = async_thread_runner.submit(dm.start_download(task_id))
+    async_thread_runner.submit(dm.start_download(task_id))
 
     await mock_response.insert_chunk(two_mib)
     mock_response.end_response()

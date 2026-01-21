@@ -87,8 +87,10 @@ class MockParallelResponse():
                     raise Exception(f"Got unexpected {range_end=}")
             if self.send_next_letter[range_end] > 0:
                 if len(self.data[range_end]) > 0:
-                    yield bytes([self.data[range_end].pop(0)])
-                    self.send_next_letter[range_end] -= 1
+                    slice_size = min(1024*256, len(self.data[range_end]))
+                    yield bytes(self.data[range_end][:slice_size])
+                    self.data[range_end] = self.data[range_end][slice_size:]
+                    self.send_next_letter[range_end] -= slice_size
                 else:
                     # No more data to send
                     break

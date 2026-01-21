@@ -38,6 +38,8 @@ async def test_start_in_running_state(async_thread_runner, test_file_setup_and_c
     future = async_thread_runner.submit(dm.start_download(task_id))
 
     assert future.result() is False, "start_download should have returned False"
+    mock_response.end_response()
+    await wait_for_state(dm, task_id, DownloadState.COMPLETED)
 
     await dm.shutdown()    
 
@@ -154,6 +156,8 @@ async def test_resume_in_running_state(async_thread_runner, test_file_setup_and_
     future = async_thread_runner.submit(dm.start_download(task_id))    
     assert future.result() is False, "start_download should have returned False"
 
+    mock_response.end_response()
+    await wait_for_state(dm, task_id, DownloadState.COMPLETED)
     await dm.shutdown()
 
 @pytest.mark.asyncio

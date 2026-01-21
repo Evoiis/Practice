@@ -49,7 +49,7 @@ async def test_output_file_with_invalid_characters():
     
 
 @pytest.mark.asyncio
-async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_runner, create_mock_response_and_set_mock_session):
+async def test_empty_output_file_name(async_thread_runner, create_mock_response_and_set_mock_session):
     chunks = [b"abc", b"def", b"ghi"]
     mock_url = "https://example.com/file.bin"
 
@@ -72,11 +72,12 @@ async def test_empty_output_file_name(test_file_setup_and_cleanup, async_thread_
 
     logging.debug(dm.get_downloads())
     assert dm.get_downloads()[task_id].output_file.endswith(".mp4")
+    await dm.shutdown()
+
+    await wait_for_state(dm, task_id, DownloadState.PAUSED)
 
     if os.path.exists(dm.get_downloads()[task_id].output_file):
         os.remove(dm.get_downloads()[task_id].output_file)
-
-    await dm.shutdown()
 
 
 @pytest.mark.asyncio
