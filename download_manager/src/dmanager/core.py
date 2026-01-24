@@ -57,7 +57,12 @@ class DownloadMetadata:
     state: DownloadState = DownloadState.PENDING
     server_supports_http_range: bool = False
     use_parallel_download: bool = None
-    worker_states: Optional[Dict[int, int]] = None
+    worker_states: Optional[dict[int, DownloadState]] = None
+    lock: asyncio.Lock = None
+
+    def __post_init__(self):
+        self.lock = asyncio.Lock()
+
 
 
 class DownloadManager:
@@ -65,22 +70,30 @@ class DownloadManager:
     Async download manager using asyncio and aiohttp.
     """
 
-    def __init__(self, running_event_update_rate_seconds: int = 1, parallel_running_event_update_rate_seconds: int = 0.5, maximum_workers_per_task: int = 5, minimum_workers_per_task: int = 1) -> None:
+    def __init__(
+            self, 
+            running_event_update_rate_seconds: int = 1, 
+            parallel_running_event_update_rate_seconds: int = 1, 
+            maximum_workers_per_task: int = 5, 
+            minimum_workers_per_task: int = 1,
+            request_timeout: int= 300
+        ) -> None:
         assert minimum_workers_per_task > 0
 
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
-        self.events_queue: queue.Queue[DownloadEvent] = queue.Queue()
+        self.events_queue: queue.Queue[DownloadEvent] = queue.Queue(maxsize=1000)
         self._tasks: Dict[int, asyncio.Task[Any]] = {}
         self._task_pools: Dict[int, list] = {}
         self._preallocate_tasks: Dict[int, asyncio.Task[Any]] = {}
-        self._data_queues: Dict[int, asyncio.Queue] = {}
+        self._data_queues: Dict[int, queue.Queue] = {}
         self._session: aiohttp.ClientSession = None
 
         self._running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
         self._parallel_running_event_update_rate_seconds = timedelta(seconds=parallel_running_event_update_rate_seconds)
         self._maximum_workers_per_task = maximum_workers_per_task
         self._minimum_workers_per_task = minimum_workers_per_task
+        self._request_timeout = request_timeout
 
     def _iterate_and_get_id(self) -> int:
         self._next_id += 1
@@ -201,10 +214,10 @@ class DownloadManager:
             await self._log_and_share_error_event(download, err)
             return False
 
-        # Parallel download decision
+        # Use parallel download decision
         if download.use_parallel_download == None:
             download.use_parallel_download = False
-            if (download.file_size_bytes > ONE_GIBIBYTE and use_parallel_download is None) or use_parallel_download is True:
+            if (download.file_size_bytes is not None and download.file_size_bytes > ONE_GIBIBYTE and use_parallel_download is None) or use_parallel_download is True:
                 download.use_parallel_download = True
 
             # If the server doesn't have http range support or didn't provide Content-Length then we can't use parallel download
@@ -283,10 +296,10 @@ class DownloadManager:
             file_size_on_disk = os.path.getsize(download.output_file)
             logging.debug(f"Found partially allocated file, resume from {file_size_on_disk=}")
         next_write_byte = file_size_on_disk
+
         async with aiofiles.open(download.output_file, "ab") as f:
             while next_write_byte < download.file_size_bytes:
-                await f.seek(next_write_byte)
-                chunk_size = min(KIBIBYTE_256, download.file_size_bytes - next_write_byte)
+                chunk_size = min(8 * ONE_MEBIBYTE, download.file_size_bytes - next_write_byte)
                 await f.write(b"\x00" * chunk_size)
                 next_write_byte += chunk_size
 
@@ -417,6 +430,8 @@ class DownloadManager:
 
             if task_id in self._task_pools:
                 del self._task_pools[task_id]
+            if task_id in self._data_queues:
+                del self._data_queues[task_id]
             
             if remove_file:
                 if os.path.exists(self._downloads[task_id].output_file):
@@ -451,7 +466,7 @@ class DownloadManager:
         - Generates an output filename if none is provided
         """
 
-        async with self._session.head(download.url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+        async with self._session.head(download.url, timeout=aiohttp.ClientTimeout(total=self._request_timeout)) as resp:
             if "ETag" in resp.headers:
                 etag = resp.headers["ETag"].strip('"')
                 if download.etag == None:
@@ -536,7 +551,7 @@ class DownloadManager:
         download.worker_states = dict()
 
         if task_id not in self._data_queues:
-            self._data_queues[task_id] = asyncio.Queue()
+            self._data_queues[task_id] = queue.Queue()
             if download.file_size_bytes is None or download.file_size_bytes == 0:
                 raise Exception("Parallel download requires Content-Length header")
             
@@ -606,7 +621,7 @@ class DownloadManager:
                 last_active_time_update = datetime.now()
 
                 async with aiofiles.open(download.output_file, "r+b") as f:
-                    async with self._session.get(download.url, headers=headers, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                    async with self._session.get(download.url, headers=headers, timeout=aiohttp.ClientTimeout(total=self._request_timeout)) as resp:
                         async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
                             chunk_start_time = datetime.now()
                             if resp.status != 206:
@@ -615,7 +630,9 @@ class DownloadManager:
                             await f.write(chunk)
 
                             next_write_byte += len(chunk)
-                            download.downloaded_bytes += len(chunk)
+                            
+                            async with download.lock:
+                                download.downloaded_bytes += len(chunk)
 
                             chunk_time_delta = datetime.now() - chunk_start_time
 
@@ -651,22 +668,23 @@ class DownloadManager:
                     worker_id=worker_id,
                     active_time=active_time
                 ))
-
-                flag = True
-                for worker in download.worker_states:
-                    if download.worker_states[worker] not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
-                        flag = False
-                        break
                 
-                if flag:
-                    download.state = DownloadState.PAUSED
-                    self.events_queue.put_nowait(DownloadEvent(
-                        task_id=download.task_id,
-                        state=download.state,
-                        output_file=download.output_file,
-                    ))
+                async with download.lock:
+                    flag = True
+                    for worker in download.worker_states:
+                        if download.worker_states[worker] not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
+                            flag = False
+                            break
+                    
+                    if flag:
+                        download.state = DownloadState.PAUSED
+                        self.events_queue.put_nowait(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                        ))
                 raise
-            except asyncio.QueueEmpty:
+            except queue.Empty:
                 logging.debug(f"Worker {worker_id} found no tasks, worker complete.")
                 
                 download.worker_states[worker_id] = DownloadState.COMPLETED
@@ -681,21 +699,22 @@ class DownloadManager:
                     worker_id=worker_id
                 ))
 
-                flag = True
-                for worker in download.worker_states:
-                    if download.worker_states[worker] != DownloadState.COMPLETED:
-                        flag = False
-                        break
+                async with download.lock:
+                    flag = True
+                    for worker in download.worker_states:
+                        if download.worker_states[worker] != DownloadState.COMPLETED:
+                            flag = False
+                            break
 
-                if flag:
-                    download.state = DownloadState.COMPLETED
-                    self.events_queue.put_nowait(DownloadEvent(
-                        task_id=download.task_id,
-                        state=download.state,
-                        output_file=download.output_file,
-                    ))
-                    del self._task_pools[download.task_id]
-                    del self._data_queues[download.task_id]
+                    if flag:
+                        download.state = DownloadState.COMPLETED
+                        self.events_queue.put_nowait(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                        ))
+                        del self._task_pools[download.task_id]
+                        del self._data_queues[download.task_id]
                 return
             except Exception as err:
                 if next_write_byte != end_bytes:
@@ -752,7 +771,7 @@ class DownloadManager:
             if download.server_supports_http_range:
                 mode = "ab"
             async with aiofiles.open(download.output_file, mode) as f:
-                async with self._session.get(download.url, headers=headers, timeout=aiohttp.ClientTimeout(total=300)) as resp:
+                async with self._session.get(download.url, headers=headers, timeout=aiohttp.ClientTimeout(total=self._request_timeout)) as resp:
                     async for chunk in resp.content.iter_chunked(KIBIBYTE_256):
                         chunk_start_time = datetime.now()
                         if resp.status not in [206, 200]:
