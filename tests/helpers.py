@@ -7,7 +7,7 @@ from typing import Dict, Tuple
 
 from dmanager.core import DownloadState
 
-DEFAULT_TIMEOUT = 209
+DEFAULT_TIMEOUT = 30
 
 async def wait_for_state(dm, task_id, expected_state, timeout_sec=DEFAULT_TIMEOUT):
     """

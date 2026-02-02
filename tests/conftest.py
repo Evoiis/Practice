@@ -68,7 +68,7 @@ class MockParallelResponse():
         self.content = self
         self.request_queue = request_queue
         self.data = copy.deepcopy(data)
-        self.send_next_letter: Dict[str: int] = {x:0 for x in range_ends}
+        self.send_next_letter: Dict[str, int] = {x:0 for x in range_ends}
         self.done = {x: False for x in range_ends}
 
     async def __aenter__(self):

@@ -78,7 +78,8 @@ class DownloadManager:
             minimum_workers_per_task: int = 1,
             request_timeout: int= 300
         ) -> None:
-        assert minimum_workers_per_task > 0
+        if minimum_workers_per_task <= 0:
+            raise Exception(f"Download Manager parameter minimum_workers_per_task must be greater than 0!")
 
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
@@ -98,6 +99,14 @@ class DownloadManager:
     def _iterate_and_get_id(self) -> int:
         self._next_id += 1
         return self._next_id
+
+    def _add_event_to_queue(self, event: DownloadEvent):
+        if self.events_queue.full():
+            logging.error(f"Events queue is FULL! Make sure the gui is absorbing events or reduce event update rates!\nRemoving the first 250 items.")
+            for _ in range(250):
+                self.events_queue.get_nowait()
+        self.events_queue.put_nowait(event)
+        
     
     async def _log_and_share_error_event(self, download: DownloadMetadata, err: Exception):
         """
@@ -105,7 +114,7 @@ class DownloadManager:
         """
         logging.error(f"{repr(err)}, {err}")
         download.state = DownloadState.ERROR
-        self.events_queue.put_nowait(DownloadEvent(
+        self._add_event_to_queue(DownloadEvent(
             task_id=download.task_id,
             state= download.state,
             error_string=f"{repr(err)}, {err}",
@@ -150,6 +159,7 @@ class DownloadManager:
     def add_download(self, url: str, output_file: Optional[str] = "") -> int:
         """
         Register a new download task.
+        NOT threadsafe, only call this from one thread.
 
         - Generates a unique task ID
         - Sanitizes and validates the output file name
@@ -158,7 +168,7 @@ class DownloadManager:
         Returns:
             int: unique task id
         """
-        id = self._iterate_and_get_id()
+        task_id = self._iterate_and_get_id()
 
         for download in self._downloads.values():
             if download.output_file == output_file:
@@ -169,8 +179,12 @@ class DownloadManager:
             output_file = ""
 
         output_file = re.sub(r'[\\/:*?"<>|]', "", output_file).rstrip(" .")
-        self._downloads[id] = DownloadMetadata(task_id=id, url=url, output_file=output_file)
-        return id
+
+        if task_id in self._downloads:
+            raise Exception(f"Error: Unexpected id in download manager downloads. {task_id=}, Downloads: {self._downloads}")
+
+        self._downloads[task_id] = DownloadMetadata(task_id=task_id, url=url, output_file=output_file)
+        return task_id
 
     async def start_download(self, task_id: int, use_parallel_download: bool = None) -> bool:
         """
@@ -215,7 +229,7 @@ class DownloadManager:
             return False
 
         # Use parallel download decision
-        if download.use_parallel_download == None:
+        if download.use_parallel_download is None:
             download.use_parallel_download = False
             if (download.file_size_bytes is not None and download.file_size_bytes > ONE_GIBIBYTE and use_parallel_download is None) or use_parallel_download is True:
                 download.use_parallel_download = True
@@ -247,7 +261,7 @@ class DownloadManager:
             if download.task_id in self._data_queues and self._data_queues[download.task_id].empty():
                 logging.info("Found file in directory and download queues are empty. Marking download as complete.")
                 download.state = DownloadState.COMPLETED
-                self.events_queue.put_nowait(DownloadEvent(
+                self._add_event_to_queue(DownloadEvent(
                     task_id=download.task_id,
                     state=download.state,
                     output_file=download.output_file
@@ -266,7 +280,7 @@ class DownloadManager:
         except asyncio.CancelledError:
             logging.debug(f"{download.task_id=} paused during pre-allocating phase.")
             download.state = DownloadState.PAUSED
-            self.events_queue.put_nowait(DownloadEvent(
+            self._add_event_to_queue(DownloadEvent(
                 task_id=download.task_id,
                 state= download.state,
                 output_file=download.output_file
@@ -285,7 +299,7 @@ class DownloadManager:
         """
 
         download.state = DownloadState.ALLOCATING_SPACE
-        self.events_queue.put_nowait(DownloadEvent(
+        self._add_event_to_queue(DownloadEvent(
             task_id=download.task_id,
             state=download.state,
             output_file=None
@@ -317,7 +331,7 @@ class DownloadManager:
         download.downloaded_bytes = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
         if await self._check_if_complete_file_on_disk(download):
             download.state = DownloadState.COMPLETED
-            self.events_queue.put_nowait(DownloadEvent(
+            self._add_event_to_queue(DownloadEvent(
                 task_id=download.task_id,
                 state=download.state,
                 output_file=download.output_file
@@ -333,13 +347,13 @@ class DownloadManager:
         - Updates download state to PAUSED and emits Paused DownloadState
         """
 
-        try:
-            logging.debug("[DM] pause_download called")
-            if task_id not in self._downloads:
-                logging.warning(f"Pause download called with invalid {task_id=}")
-                return False            
+        logging.debug("[pause_download] called")
+        if task_id not in self._downloads:
+            logging.warning(f"Pause download called with invalid {task_id=}")
+            return False
+        download = self._downloads[task_id]
 
-            download = self._downloads[task_id]
+        try:
             if download.state == DownloadState.ALLOCATING_SPACE:
                 if task_id in self._preallocate_tasks:
                     task = self._preallocate_tasks[task_id]
@@ -356,15 +370,12 @@ class DownloadManager:
                     return False
 
             if download.state != DownloadState.RUNNING:
-                logging.warning("Pause download called on non-running task")
+                logging.warning("[pause_download] called on non-running task")
                 return False
 
-            logging.debug("[DM] pause_download after initial checks")
             if download.use_parallel_download:
-                logging.debug(f"[DM] pause_download in parallel download, {self._task_pools=}")
                 if task_id not in self._task_pools:
                     return False
-                logging.debug(f"Attempting to stop tasks in {self._task_pools[task_id]}")
                 task_pool = self._task_pools[task_id]
                 for task in task_pool:
                     if not task.done():
@@ -376,9 +387,8 @@ class DownloadManager:
                 if download.task_id in self._task_pools:
                     del self._task_pools[download.task_id]
             else:
-                logging.debug("[DM] pause_download in single connection download")
                 if task_id not in self._tasks:
-                    raise Exception("Error: task_id not in DownloadManager task list")
+                    raise Exception("Error: [pause_download], task_id not in DownloadManager task list")
                 task = self._tasks[task_id]
                 if not task.done():
                     task.cancel()
@@ -415,9 +425,9 @@ class DownloadManager:
         """
 
         try:
-            logging.debug("delete_download called")
+            logging.debug("[delete_download] called")
             if task_id not in self._downloads:
-                logging.warning(f"Download Manager delete_download called with invalid {task_id=}")
+                logging.warning(f"[delete_download] called with invalid {task_id=}")
                 return False
 
             download = self._downloads[task_id]
@@ -437,22 +447,22 @@ class DownloadManager:
                 if os.path.exists(self._downloads[task_id].output_file):
                     os.remove(self._downloads[task_id].output_file)
             
-            if task_id in self._downloads:
-                del self._downloads[task_id]
-
-            self.events_queue.put_nowait(
+            self._add_event_to_queue(
                 DownloadEvent(
                     task_id=task_id,
                     state=DownloadState.DELETED,
                     output_file=None
                 )
-            )
-
-            return True
+            )            
         except Exception as err:
             tb = traceback.format_exc()
             logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
+        
+        if task_id in self._downloads:
+            del self._downloads[task_id]
+
+        return True
 
 
     async def _check_download_headers(self, download: DownloadMetadata):
@@ -467,9 +477,12 @@ class DownloadManager:
         """
 
         async with self._session.head(download.url, timeout=aiohttp.ClientTimeout(total=self._request_timeout)) as resp:
+            if resp.status >= 300 and resp.status < 200:
+                raise Exception(f"Error: Header request received invalid response statue: {resp.status}.")
+
             if "ETag" in resp.headers:
                 etag = resp.headers["ETag"].strip('"')
-                if download.etag == None:
+                if download.etag is None:
                     download.etag = etag
                 elif etag != download.etag:
                     logging.debug(f"Etag changed for {download.task_id=}, {download.url=}, {download.output_file=}. Restarting download from scratch.")
@@ -522,7 +535,7 @@ class DownloadManager:
                 return True
             elif output_file_size > download.file_size_bytes:
                 download.state = DownloadState.ERROR
-                self.events_queue.put_nowait(DownloadEvent(
+                self._add_event_to_queue(DownloadEvent(
                     task_id=download.task_id,
                     state= download.state,
                     error_string="There is already a downloaded file with the same name with a greater size!",
@@ -645,7 +658,7 @@ class DownloadManager:
                                 chunk_time_seconds = chunk_time_delta.total_seconds()
                                 download.state = DownloadState.RUNNING
                                 download.worker_states[worker_id] = DownloadState.RUNNING
-                                self.events_queue.put_nowait(DownloadEvent(
+                                self._add_event_to_queue(DownloadEvent(
                                     task_id=download.task_id,
                                     state=download.state,
                                     output_file=download.output_file,
@@ -661,7 +674,7 @@ class DownloadManager:
                     self._data_queues[download.task_id].put_nowait((next_write_byte, end_bytes))
 
                 download.worker_states[worker_id] = DownloadState.PAUSED
-                self.events_queue.put_nowait(DownloadEvent(
+                self._add_event_to_queue(DownloadEvent(
                     task_id=download.task_id,
                     state=download.worker_states[worker_id],
                     output_file=download.output_file,
@@ -678,7 +691,7 @@ class DownloadManager:
                     
                     if flag:
                         download.state = DownloadState.PAUSED
-                        self.events_queue.put_nowait(DownloadEvent(
+                        self._add_event_to_queue(DownloadEvent(
                             task_id=download.task_id,
                             state=download.state,
                             output_file=download.output_file,
@@ -688,7 +701,7 @@ class DownloadManager:
                 logging.debug(f"Worker {worker_id} found no tasks, worker complete.")
                 
                 download.worker_states[worker_id] = DownloadState.COMPLETED
-                self.events_queue.put_nowait(DownloadEvent(
+                self._add_event_to_queue(DownloadEvent(
                     task_id=download.task_id,
                     state=download.worker_states[worker_id],
                     output_file=download.output_file,
@@ -708,7 +721,7 @@ class DownloadManager:
 
                     if flag:
                         download.state = DownloadState.COMPLETED
-                        self.events_queue.put_nowait(DownloadEvent(
+                        self._add_event_to_queue(DownloadEvent(
                             task_id=download.task_id,
                             state=download.state,
                             output_file=download.output_file,
@@ -724,7 +737,7 @@ class DownloadManager:
                 tb = traceback.format_exc()
                 logging.error(f"Traceback: {tb}")
                 download.state = DownloadState.ERROR
-                self.events_queue.put_nowait(DownloadEvent(
+                self._add_event_to_queue(DownloadEvent(
                     task_id=download.task_id,
                     state= download.state,
                     error_string=f"{repr(err)}, {err}",
@@ -757,7 +770,7 @@ class DownloadManager:
             
             # TODO Get rid of this running event update
             download.state = DownloadState.RUNNING
-            self.events_queue.put_nowait(DownloadEvent(
+            self._add_event_to_queue(DownloadEvent(
                 task_id=download.task_id,
                 state=download.state,
                 output_file=download.output_file
@@ -789,7 +802,7 @@ class DownloadManager:
                             last_running_update = datetime.now()
                             download.state = DownloadState.RUNNING
                             chunk_time_seconds = chunk_time_delta.total_seconds()
-                            self.events_queue.put_nowait(DownloadEvent(
+                            self._add_event_to_queue(DownloadEvent(
                                 task_id=download.task_id,
                                 state=download.state,
                                 output_file=download.output_file,
@@ -800,7 +813,7 @@ class DownloadManager:
                             ))
 
             download.state = DownloadState.COMPLETED
-            self.events_queue.put_nowait(DownloadEvent(
+            self._add_event_to_queue(DownloadEvent(
                 task_id=download.task_id,
                 state= download.state,
                 output_file=download.output_file,
@@ -813,7 +826,7 @@ class DownloadManager:
             del self._tasks[download.task_id]
         except asyncio.CancelledError:
             download.state = DownloadState.PAUSED
-            self.events_queue.put_nowait(DownloadEvent(
+            self._add_event_to_queue(DownloadEvent(
                 task_id=download.task_id,
                 state= download.state,
                 output_file=download.output_file

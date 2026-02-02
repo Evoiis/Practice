@@ -1,6 +1,6 @@
 # Download Manager
 
-A simple python download manager for windows.
+A simple python download manager for Windows.
 
 
 # Features
