@@ -67,7 +67,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
 @pytest.mark.asyncio
 async def test_parallel_download_pause(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -114,7 +114,7 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
 @pytest.mark.asyncio
 async def test_parallel_download_resume(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -177,7 +177,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
 @pytest.mark.asyncio
 async def test_parallel_download_delete_running(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -226,7 +226,7 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
 @pytest.mark.asyncio
 async def test_parallel_download_delete_completed(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -281,7 +281,7 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
 @pytest.mark.asyncio
 async def test_multiple_simultaneous_parallel_download(async_thread_runner, create_multiple_parallel_mock_response_and_mock_sessions, test_multiple_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -353,7 +353,7 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
 async def test_core_file_preallocation(test_file_setup_and_cleanup):
 
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
     mock_file_name = "test_file.bin"
     mock_file_total_size = 9000
     test_file_setup_and_cleanup(mock_file_name)
@@ -375,7 +375,7 @@ async def test_core_file_preallocation(test_file_setup_and_cleanup):
 @pytest.mark.asyncio
 async def test_parallel_pause_during_preallocate(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers, minimum_workers_per_task=n_workers)
+    dm = DownloadManager(maximum_workers_per_task=n_workers)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"

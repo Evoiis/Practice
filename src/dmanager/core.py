@@ -16,7 +16,7 @@ import traceback
 ONE_GIBIBYTE = 1073741824
 ONE_MEBIBYTE = 1048576
 ONE_KIBIBYTE = 1024
-KIBIBYTE_256 = 256 * 1024
+KIBIBYTE_256 = 256 * ONE_KIBIBYTE
 
 class DownloadState(Enum):
     PAUSED = 0
@@ -59,6 +59,7 @@ class DownloadMetadata:
     use_parallel_download: bool = None
     worker_states: Optional[dict[int, DownloadState]] = None
     lock: asyncio.Lock = None
+    n_workers: int = None
 
     def __post_init__(self):
         self.lock = asyncio.Lock()
@@ -75,11 +76,8 @@ class DownloadManager:
             running_event_update_rate_seconds: int = 1, 
             parallel_running_event_update_rate_seconds: int = 1, 
             maximum_workers_per_task: int = 5, 
-            minimum_workers_per_task: int = 1,
             request_timeout: int= 300
         ) -> None:
-        if minimum_workers_per_task <= 0:
-            raise Exception(f"Download Manager parameter minimum_workers_per_task must be greater than 0!")
 
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
@@ -93,7 +91,6 @@ class DownloadManager:
         self._running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
         self._parallel_running_event_update_rate_seconds = timedelta(seconds=parallel_running_event_update_rate_seconds)
         self._maximum_workers_per_task = maximum_workers_per_task
-        self._minimum_workers_per_task = minimum_workers_per_task
         self._request_timeout = request_timeout
 
     def _iterate_and_get_id(self) -> int:
@@ -156,7 +153,7 @@ class DownloadManager:
         else:
             return self.events_queue.get_nowait()            
 
-    def add_download(self, url: str, output_file: Optional[str] = "") -> int:
+    def add_download(self, url: str, output_file: Optional[str] = "", n_workers: Optional[int] =None) -> int:
         """
         Register a new download task.
         NOT threadsafe, only call this from one thread.
@@ -168,6 +165,7 @@ class DownloadManager:
         Returns:
             int: unique task id
         """
+
         task_id = self._iterate_and_get_id()
 
         for download in self._downloads.values():
@@ -183,7 +181,7 @@ class DownloadManager:
         if task_id in self._downloads:
             raise Exception(f"Error: Unexpected id in download manager downloads. {task_id=}, Downloads: {self._downloads}")
 
-        self._downloads[task_id] = DownloadMetadata(task_id=task_id, url=url, output_file=output_file)
+        self._downloads[task_id] = DownloadMetadata(task_id=task_id, url=url, output_file=output_file, n_workers=n_workers)
         return task_id
 
     async def start_download(self, task_id: int, use_parallel_download: bool = None) -> bool:
@@ -589,13 +587,11 @@ class DownloadManager:
                     self._data_queues[task_id].put_nowait((prev_bytes, current_byte - 1))
                 prev_bytes = current_byte           
             
+        if download.n_workers is None:
+            download.n_workers = self._maximum_workers_per_task
 
-        n_workers = max(min(self._maximum_workers_per_task, self._data_queues[task_id].qsize()), self._minimum_workers_per_task)
-
-        logging.debug(f"{self._data_queues[task_id]=}")
-
-        logging.debug(f"Starting {n_workers=}")
-        for n in range(n_workers):
+        logging.debug(f"Starting {download.n_workers=} for task {download.task_id}")
+        for n in range(download.n_workers):
             download.worker_states[n] = DownloadState.PENDING
             self._task_pools[task_id].append(
                 asyncio.create_task(self._parallel_download_coroutine(
@@ -603,7 +599,6 @@ class DownloadManager:
                     n
                 ))
             )
-            
 
     async def _parallel_download_coroutine(self, download: DownloadMetadata, worker_id) -> None:
         """
