@@ -12,6 +12,7 @@ import asyncio
 import aiohttp
 import aiofiles
 import traceback
+import time
 
 from .constants import ONE_GIBIBYTE, CHUNK_SIZE, SEGMENT_SIZE, PREALLOCATE_CHUNK_SIZE
 
@@ -89,7 +90,8 @@ class DownloadManager:
             running_event_update_rate_seconds: int = 1, 
             parallel_running_event_update_rate_seconds: int = 1, 
             maximum_workers_per_task: int = 5, 
-            request_timeout: int= 300
+            request_timeout: int= 300,
+            parallel_download_segment_size: int= SEGMENT_SIZE
         ) -> None:
 
         self._downloads: Dict[int, DownloadMetadata] = {}
@@ -101,9 +103,10 @@ class DownloadManager:
         self._session: aiohttp.ClientSession = None
 
         self._running_event_update_rate_seconds = timedelta(seconds=running_event_update_rate_seconds)
-        self._parallel_running_event_update_rate_seconds = timedelta(seconds=parallel_running_event_update_rate_seconds)
+        self._parallel_running_event_update_rate_seconds = parallel_running_event_update_rate_seconds
         self._maximum_workers_per_task = maximum_workers_per_task
         self._request_timeout = request_timeout
+        self._parallel_download_segment_size = parallel_download_segment_size
 
     def _iterate_and_get_id(self) -> int:
         self._next_id += 1
@@ -588,7 +591,7 @@ class DownloadManager:
             if download.file_size_bytes is None or download.file_size_bytes == 0:
                 raise Exception("Parallel download requires Content-Length header")
 
-            download.parallel_metadata.increment = SEGMENT_SIZE
+            download.parallel_metadata.increment = self._parallel_download_segment_size
             download.parallel_metadata.segment_iterator = iter(range(0, download.file_size_bytes, download.parallel_metadata.increment))
 
         if download.parallel_metadata.n_workers is None:
@@ -620,8 +623,9 @@ class DownloadManager:
         logging.debug(f"Task {download.task_id}, Worker {worker_id} initialized.")
         next_write_byte = 0
         end_bytes = 0
+        previous_speed = 0
         active_time = timedelta()
-        chunk_time_delta = timedelta()
+        chunk_time_delta = 0.
         while True:
             try:
                 try:
@@ -633,47 +637,53 @@ class DownloadManager:
                 
                 logging.debug(f"Task {download.task_id}, Worker {worker_id} picked up download segment: ({start_bytes}, {end_bytes})")
                 next_write_byte = start_bytes
-                
+
                 headers = {
                     "Range": f"bytes={start_bytes}-{end_bytes}"
                 }
 
-                last_running_update = datetime.now() - self._parallel_running_event_update_rate_seconds
-                last_active_time_update = datetime.now()
+                last_running_update = time.monotonic() - self._parallel_running_event_update_rate_seconds
+                last_active_time_update = time.monotonic()
 
                 async with aiofiles.open(download.output_file, "r+b") as f:
                     async with self._session.get(download.url, headers=headers, timeout=aiohttp.ClientTimeout(total=self._request_timeout)) as resp:
                         async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
-                            chunk_start_time = datetime.now()
+                            chunk_start_time = time.monotonic()
                             if resp.status != 206:
                                 raise Exception(f"[Parallel] Received unexpected status: {resp.status=}, {headers=}")
                             await f.seek(next_write_byte)
                             await f.write(chunk)
 
                             next_write_byte += len(chunk)
-                            
+
                             async with download.parallel_metadata.worker_state_lock:
                                 download.downloaded_bytes += len(chunk)
 
-                            chunk_time_delta = datetime.now() - chunk_start_time
+                            now = time.monotonic()
+                            chunk_time_delta = now - chunk_start_time
 
-                            active_time += datetime.now() - last_active_time_update
-                            last_active_time_update = datetime.now()
+                            active_time += timedelta(seconds=(now - last_active_time_update))
+                            last_active_time_update = now
 
-                            if (datetime.now() - last_running_update) > self._parallel_running_event_update_rate_seconds:
-                                last_running_update = datetime.now()
+                            if (time.monotonic() - last_running_update) > self._parallel_running_event_update_rate_seconds:
+                                last_running_update = time.monotonic()
 
-                                chunk_time_seconds = chunk_time_delta.total_seconds()
                                 async with download.parallel_metadata.download_state_lock:
                                     if download.state != DownloadState.ERROR:
                                         download.state = DownloadState.RUNNING
                                 async with download.parallel_metadata.worker_state_lock:
                                     download.parallel_metadata.worker_states[worker_id] = DownloadState.RUNNING
+                                
+                                # Calculate download speed for UI
+                                download_speed = len(chunk)/chunk_time_delta if chunk_time_delta > 0 else 0
+                                smoothed_speed = self.exponential_moving_average(download_speed, previous_speed)
+                                previous_speed = smoothed_speed
+
                                 self._add_event_to_queue(DownloadEvent(
                                     task_id=download.task_id,
                                     state=DownloadState.RUNNING,
                                     output_file=download.output_file,
-                                    download_speed=len(chunk)/chunk_time_seconds if chunk_time_seconds > 0 else 0,
+                                    download_speed=smoothed_speed,
                                     active_time=active_time,
                                     downloaded_bytes=download.downloaded_bytes,
                                     download_size_bytes=download.file_size_bytes,
@@ -853,5 +863,10 @@ class DownloadManager:
             await self._log_and_share_error_event(download, err)
             if download.task_id in self._tasks:
                 del self._tasks[download.task_id]
+    
+    @staticmethod
+    def exponential_moving_average(current_value: float, previous_speed: float, alpha: float= 0.4):
+        return alpha * current_value + (1 - alpha) * previous_speed
+
 
 __all__ = ["DownloadManager", "DownloadMetadata", "DownloadState", "DownloadEvent"]

@@ -4,7 +4,6 @@ import pytest
 import logging
 
 from dmanager.core import DownloadManager, DownloadState, DownloadMetadata
-from dmanager.constants import SEGMENT_SIZE
 from tests.helpers import wait_for_state, verify_file, wait_for_file_to_be_created, wait_for_multiple_states
 
 
@@ -15,26 +14,27 @@ from tests.helpers import wait_for_state, verify_file, wait_for_file_to_be_creat
 @pytest.mark.asyncio
 async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup, n_workers):
     logging.info(f"Running with {n_workers=}")
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    
 
     data = {
-        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):  list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1): list(b"d" * segment_size)
     }
 
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4 * SEGMENT_SIZE,
+            "Content-Length": 4 * segment_size,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -43,7 +43,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
+        mock_response.set_range_end_n_send(key, segment_size)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -68,7 +68,8 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
 @pytest.mark.asyncio
 async def test_parallel_download_pause(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -76,16 +77,16 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
 
     
     data = {
-        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):  list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1): list(b"d" * segment_size)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4 * SEGMENT_SIZE,
+            "Content-Length": 4 * segment_size,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -115,7 +116,8 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
 @pytest.mark.asyncio
 async def test_parallel_download_resume(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -123,16 +125,16 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
 
     
     data = {
-        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):  list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1): list(b"d" * segment_size)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4 * SEGMENT_SIZE,
+            "Content-Length": 4 * segment_size,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -141,7 +143,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, SEGMENT_SIZE//2)
+        mock_response.set_range_end_n_send(key, segment_size//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -159,7 +161,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     async_thread_runner.submit(dm.start_download(task_id, use_parallel_download=True))
 
     for key in data:
-        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
+        mock_response.set_range_end_n_send(key, segment_size)
         mock_response.set_range_end_done(key)
 
     for _ in range(n_workers):
@@ -178,7 +180,8 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
 @pytest.mark.asyncio
 async def test_parallel_download_delete_running(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -187,16 +190,16 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     
     
     data = {
-        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):  list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1): list(b"d" * segment_size)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4 * SEGMENT_SIZE,
+            "Content-Length": 4 * segment_size,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -205,7 +208,7 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, SEGMENT_SIZE//2)
+        mock_response.set_range_end_n_send(key, segment_size//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -227,23 +230,24 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
 @pytest.mark.asyncio
 async def test_parallel_download_delete_completed(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
     data = {
-        str(SEGMENT_SIZE - 1):        list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1):  list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):        list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1):  list(b"d" * segment_size)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4 * SEGMENT_SIZE,
+            "Content-Length": 4 * segment_size,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -252,7 +256,7 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
+        mock_response.set_range_end_n_send(key, segment_size)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -287,7 +291,8 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
 @pytest.mark.asyncio
 async def test_multiple_simultaneous_parallel_download(async_thread_runner, create_multiple_parallel_mock_response_and_mock_sessions, test_multiple_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
@@ -298,30 +303,30 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
 
     
     data = {
-        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
-        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
+        str(segment_size - 1):  list(b"a" * segment_size ),
+        str((segment_size * 2) - 1):  list(b"b" * segment_size ),
+        str((segment_size * 3) - 1):  list(b"c" * segment_size ),
+        str((segment_size * 4) - 1): list(b"d" * segment_size)
     }
 
     mock_responses = create_multiple_parallel_mock_response_and_mock_sessions({
         mock_url: {
             "status": 206,
-            "headers": {"Content-Length": 4 * SEGMENT_SIZE, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4 * segment_size, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
         mock_url_2: {
             "status": 206,
-            "headers": {"Content-Length": 4 * SEGMENT_SIZE, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4 * segment_size, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
     })
 
     for key in data:
-        mock_responses[mock_url].set_range_end_n_send(key, SEGMENT_SIZE)
-        mock_responses[mock_url_2].set_range_end_n_send(key, SEGMENT_SIZE)
+        mock_responses[mock_url].set_range_end_n_send(key, segment_size)
+        mock_responses[mock_url_2].set_range_end_n_send(key, segment_size)
         mock_responses[mock_url].set_range_end_done(key)
         mock_responses[mock_url_2].set_range_end_done(key)
     
@@ -359,7 +364,9 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
 async def test_core_file_preallocation(test_file_setup_and_cleanup):
 
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
+
     mock_file_name = "test_file.bin"
     mock_file_total_size = 9000
     test_file_setup_and_cleanup(mock_file_name)
@@ -381,7 +388,8 @@ async def test_core_file_preallocation(test_file_setup_and_cleanup):
 @pytest.mark.asyncio
 async def test_parallel_pause_during_preallocate(async_thread_runner, create_parallel_mock_response_and_set_mock_session, test_file_setup_and_cleanup):
     n_workers = 4
-    dm = DownloadManager(maximum_workers_per_task=n_workers)
+    segment_size = 16 * 1024
+    dm = DownloadManager(maximum_workers_per_task=n_workers, parallel_download_segment_size=segment_size)
 
     mock_url = "https://example.com/file.txt"
     mock_file_name = "test_file.txt"
