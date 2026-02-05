@@ -13,12 +13,8 @@ import aiohttp
 import aiofiles
 import traceback
 
-ONE_GIBIBYTE = 1073741824
-ONE_MEBIBYTE = 1048576
-ONE_KIBIBYTE = 1024
-CHUNK_SIZE = 256 * ONE_KIBIBYTE
-PREALLOCATE_CHUNK_SIZE = 8 * ONE_MEBIBYTE
-SEGMENT_SIZE = 16 * ONE_MEBIBYTE
+from .constants import ONE_GIBIBYTE, CHUNK_SIZE, SEGMENT_SIZE, PREALLOCATE_CHUNK_SIZE
+
 
 class DownloadState(Enum):
     PAUSED = 0
@@ -633,7 +629,7 @@ class DownloadManager:
                 except queue.Empty:
                     async with download.parallel_metadata.iterator_lock:
                         start_bytes = next(download.parallel_metadata.segment_iterator)
-                        end_bytes = min(start_bytes + download.parallel_metadata.increment -1, download.file_size_bytes)
+                        end_bytes = min(start_bytes + download.parallel_metadata.increment - 1, download.file_size_bytes)
                 
                 logging.debug(f"Task {download.task_id}, Worker {worker_id} picked up download segment: ({start_bytes}, {end_bytes})")
                 next_write_byte = start_bytes
@@ -688,63 +684,61 @@ class DownloadManager:
                 if next_write_byte != end_bytes:
                     download.parallel_metadata.leftover_segments.put_nowait((next_write_byte, end_bytes))
 
+                flag = True
                 async with download.parallel_metadata.worker_state_lock:
                     download.parallel_metadata.worker_states[worker_id] = DownloadState.PAUSED
-                    self._add_event_to_queue(DownloadEvent(
-                        task_id=download.task_id,
-                        state=download.parallel_metadata.worker_states[worker_id],
-                        output_file=download.output_file,
-                        worker_id=worker_id,
-                        active_time=active_time
-                    ))
-                
-                    flag = True
                     for worker in download.parallel_metadata.worker_states:
                         if download.parallel_metadata.worker_states[worker] not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
                             flag = False
                             break
-                    
-                    if flag:
-                        async with download.parallel_metadata.download_state_lock:
-                            download.state = DownloadState.PAUSED
-                            self._add_event_to_queue(DownloadEvent(
-                                task_id=download.task_id,
-                                state=download.state,
-                                output_file=download.output_file,
-                            ))
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.parallel_metadata.worker_states[worker_id],
+                    output_file=download.output_file,
+                    worker_id=worker_id,
+                    active_time=active_time
+                ))                
+                
+                if flag:
+                    async with download.parallel_metadata.download_state_lock:
+                        download.state = DownloadState.PAUSED
+                        self._add_event_to_queue(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                        ))
                 raise
             except StopIteration:
-                logging.debug(f"Worker {worker_id} found no tasks, worker complete.")
+                logging.debug(f"Download {download.task_id}, Worker {worker_id}, found no tasks, worker complete.")
                 download.parallel_metadata.iterator_empty = True
                 
+                flag = True
                 async with download.parallel_metadata.worker_state_lock:
                     download.parallel_metadata.worker_states[worker_id] = DownloadState.COMPLETED
-                    self._add_event_to_queue(DownloadEvent(
-                        task_id=download.task_id,
-                        state=download.parallel_metadata.worker_states[worker_id],
-                        output_file=download.output_file,
-                        download_speed=0,
-                        active_time=active_time,
-                        downloaded_bytes=download.downloaded_bytes,
-                        download_size_bytes=download.file_size_bytes,
-                        worker_id=worker_id
-                    ))
-
-                    flag = True
                     for worker in download.parallel_metadata.worker_states:
                         if download.parallel_metadata.worker_states[worker] != DownloadState.COMPLETED:
                             flag = False
                             break
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.parallel_metadata.worker_states[worker_id],
+                    output_file=download.output_file,
+                    download_speed=0,
+                    active_time=active_time,
+                    downloaded_bytes=download.downloaded_bytes,
+                    download_size_bytes=download.file_size_bytes,
+                    worker_id=worker_id
+                ))
 
-                    if flag:
-                        async with download.parallel_metadata.download_state_lock:
-                            download.state = DownloadState.COMPLETED
-                            self._add_event_to_queue(DownloadEvent(
-                                task_id=download.task_id,
-                                state=download.state,
-                                output_file=download.output_file,
-                            ))
-                        del self._task_pools[download.task_id]
+                if flag:
+                    async with download.parallel_metadata.download_state_lock:
+                        download.state = DownloadState.COMPLETED
+                        self._add_event_to_queue(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                        ))
+                    del self._task_pools[download.task_id]
                 return
             except Exception as err:
                 if next_write_byte != end_bytes:

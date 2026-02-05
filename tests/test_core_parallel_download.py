@@ -4,6 +4,7 @@ import pytest
 import logging
 
 from dmanager.core import DownloadManager, DownloadState, DownloadMetadata
+from dmanager.constants import SEGMENT_SIZE
 from tests.helpers import wait_for_state, verify_file, wait_for_file_to_be_created, wait_for_multiple_states
 
 
@@ -20,20 +21,20 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    RANGE_SIZE = 1048576
+    
 
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
     }
 
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4194304,
+            "Content-Length": 4 * SEGMENT_SIZE,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -42,7 +43,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, RANGE_SIZE)
+        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -52,7 +53,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     await wait_for_state(dm, task_id, DownloadState.ALLOCATING_SPACE)
 
     for _ in range(n_workers):
-        await wait_for_state(dm, task_id, DownloadState.COMPLETED)
+        await wait_for_state(dm, task_id, DownloadState.COMPLETED, 120)
 
     verify_file(
         mock_file_name,
@@ -73,18 +74,18 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    RANGE_SIZE = 1048576
+    
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4194304,
+            "Content-Length": 4 * SEGMENT_SIZE,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -120,18 +121,18 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    RANGE_SIZE = 1048576
+    
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4194304,
+            "Content-Length": 4 * SEGMENT_SIZE,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -140,7 +141,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, RANGE_SIZE//2)
+        mock_response.set_range_end_n_send(key, SEGMENT_SIZE//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -158,7 +159,7 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     async_thread_runner.submit(dm.start_download(task_id, use_parallel_download=True))
 
     for key in data:
-        mock_response.set_range_end_n_send(key, RANGE_SIZE)
+        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
         mock_response.set_range_end_done(key)
 
     for _ in range(n_workers):
@@ -184,18 +185,18 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     test_file_setup_and_cleanup(mock_file_name)
 
     
-    RANGE_SIZE = 1048576
+    
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4194304,
+            "Content-Length": 4 * SEGMENT_SIZE,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -204,7 +205,7 @@ async def test_parallel_download_delete_running(async_thread_runner, create_para
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, RANGE_SIZE//2)
+        mock_response.set_range_end_n_send(key, SEGMENT_SIZE//2)
     
     task_id = dm.add_download(mock_url, mock_file_name)
 
@@ -232,19 +233,17 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     mock_file_name = "test_file.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
-    
-    RANGE_SIZE = 1048576
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):        list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1):  list(b"d" * SEGMENT_SIZE)
     }
 
     mock_response = create_parallel_mock_response_and_set_mock_session(
         206,
         {
-            "Content-Length": 4194304,
+            "Content-Length": 4 * SEGMENT_SIZE,
             "Accept-Ranges": "bytes"
         },
         mock_url,
@@ -253,7 +252,7 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     )
 
     for key in data:
-        mock_response.set_range_end_n_send(key, RANGE_SIZE)
+        mock_response.set_range_end_n_send(key, SEGMENT_SIZE)
         mock_response.set_range_end_done(key)
     
     task_id = dm.add_download(mock_url, mock_file_name)
@@ -262,6 +261,13 @@ async def test_parallel_download_delete_completed(async_thread_runner, create_pa
     
     await wait_for_state(dm, task_id, DownloadState.ALLOCATING_SPACE)
     await wait_for_state(dm, task_id, DownloadState.COMPLETED)
+
+    await wait_for_multiple_states(
+        dm,
+        {
+            (task_id, DownloadState.COMPLETED): n_workers   
+        }
+    )
 
     async_thread_runner.submit(dm.delete_download(task_id, remove_file=False))
 
@@ -290,32 +296,32 @@ async def test_multiple_simultaneous_parallel_download(async_thread_runner, crea
     mock_file_name_2 = "test_file_2.txt"
     test_multiple_file_setup_and_cleanup([mock_file_name, mock_file_name_2])
 
-    RANGE_SIZE = 1048576
+    
     data = {
-        str(RANGE_SIZE - 1):  list(b"a" * RANGE_SIZE ),
-        str((RANGE_SIZE * 2) - 1):  list(b"b" * RANGE_SIZE ),
-        str((RANGE_SIZE * 3) - 1):  list(b"c" * RANGE_SIZE ),
-        str((RANGE_SIZE * 4)): list(b"d" * RANGE_SIZE)
+        str(SEGMENT_SIZE - 1):  list(b"a" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 2) - 1):  list(b"b" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 3) - 1):  list(b"c" * SEGMENT_SIZE ),
+        str((SEGMENT_SIZE * 4) - 1): list(b"d" * SEGMENT_SIZE)
     }
 
     mock_responses = create_multiple_parallel_mock_response_and_mock_sessions({
         mock_url: {
             "status": 206,
-            "headers": {"Content-Length": 4194304, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4 * SEGMENT_SIZE, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
         mock_url_2: {
             "status": 206,
-            "headers": {"Content-Length": 4194304, "Accept-Ranges": "bytes"},
+            "headers": {"Content-Length": 4 * SEGMENT_SIZE, "Accept-Ranges": "bytes"},
             "range_ends": list(data.keys()),
             "data": data
         },
     })
 
     for key in data:
-        mock_responses[mock_url].set_range_end_n_send(key, RANGE_SIZE)
-        mock_responses[mock_url_2].set_range_end_n_send(key, RANGE_SIZE)
+        mock_responses[mock_url].set_range_end_n_send(key, SEGMENT_SIZE)
+        mock_responses[mock_url_2].set_range_end_n_send(key, SEGMENT_SIZE)
         mock_responses[mock_url].set_range_end_done(key)
         mock_responses[mock_url_2].set_range_end_done(key)
     
