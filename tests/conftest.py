@@ -44,6 +44,7 @@ class MockResponse:
 class MockSession:
     def __init__(self, responses):
         self._responses = responses
+        self.closed = False
 
     async def __aenter__(self):
         return self
@@ -58,6 +59,7 @@ class MockSession:
         return self._responses[url]
     
     async def close(self):
+        self.closed = True
         return
 
 
@@ -114,6 +116,7 @@ class MockParallelSession:
     def __init__(self, responses, request_queues):
         self._responses = responses
         self.request_queues = request_queues
+        self.closed = False
 
     async def __aenter__(self):
         return self
@@ -129,6 +132,7 @@ class MockParallelSession:
         return self._responses[url]
 
     async def close(self):
+        self.closed = True
         return
 
 

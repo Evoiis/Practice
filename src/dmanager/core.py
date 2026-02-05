@@ -13,6 +13,7 @@ import aiohttp
 import aiofiles
 import traceback
 import time
+import uuid
 
 from .constants import ONE_GIBIBYTE, CHUNK_SIZE, SEGMENT_SIZE, PREALLOCATE_CHUNK_SIZE
 from .speedcalculator import SpeedCalculator
@@ -25,6 +26,7 @@ class DownloadState(Enum):
     DELETED = 4
     ALLOCATING_SPACE = 5
     ERROR = 6
+    STARTING = 7
 
 
 @dataclass
@@ -43,20 +45,6 @@ class DownloadEvent:
 
     def __post_init__(self):
         self.time = datetime.now()
-
-@dataclass
-class DownloadMetadata:
-    task_id: int
-    url: str
-    output_file: str
-    etag: str = None
-    downloaded_bytes: int = 0
-    file_size_bytes: int = None
-    active_time: timedelta = timedelta()
-    state: DownloadState = DownloadState.PENDING
-    server_supports_http_range: bool = False
-    use_parallel_download: bool = None
-    parallel_metadata: ParallelDownloadMetadata = None
 
 @dataclass
 class ParallelDownloadMetadata:
@@ -78,6 +66,19 @@ class ParallelDownloadMetadata:
         self.download_state_lock = asyncio.Lock()
         self.leftover_segments = queue.Queue()
 
+@dataclass
+class DownloadMetadata:
+    task_id: int
+    url: str
+    output_file: str
+    etag: str = None
+    downloaded_bytes: int = 0
+    file_size_bytes: int = None
+    active_time: timedelta = timedelta()
+    state: DownloadState = DownloadState.PENDING
+    server_supports_http_range: bool = False
+    use_parallel_download: bool = None
+    parallel_metadata: ParallelDownloadMetadata = None
 
 
 class DownloadManager:
@@ -93,6 +94,9 @@ class DownloadManager:
             request_timeout: int= 300,
             parallel_download_segment_size: int= SEGMENT_SIZE
         ) -> None:
+
+        if maximum_workers_per_task < 1:
+            raise Exception("Download Manager parameter, maximum_workers_per_task, must be an integer greater than zero")
 
         self._downloads: Dict[int, DownloadMetadata] = {}
         self._next_id = 0
@@ -132,28 +136,42 @@ class DownloadManager:
             error_string=f"{repr(err)}, {err}",
             output_file=download.output_file
         ))
-
+    
     async def shutdown(self):
-        task_sets = [self._tasks.values(), self._preallocate_tasks.values()]
+        all_tasks = []
+        all_tasks.extend(self._tasks.values())
+        all_tasks.extend(self._preallocate_tasks.values())
 
         for pool in self._task_pools.values():
-            task_sets.append(pool)
+            all_tasks.extend(pool)
 
-        for task_set in task_sets:
-            for task in task_set:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    
 
-        if self._session is not None:
+        if not all_tasks:
+            logging.debug("shutdown: no tasks to cancel")
+        else:
+            logging.info(f"shutdown: cancelling {len(all_tasks)} tasks...")
+
+            # Cancel them all at once
+            for t in all_tasks:
+                if not t.done():
+                    t.cancel()
+
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+
+            for res in results:
+                if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
+                    logging.error(f"Task raised during shutdown: {res}", exc_info=True)
+
+        # Now close the session
+        if self._session is not None and not self._session.closed:
             try:
                 await self._session.close()
-            except asyncio.CancelledError:
-                pass
+                # Very small grace period helps avoid ResourceWarning on SSL
+                await asyncio.sleep(1)
+            except Exception as e:
+                logging.warning(f"Error closing aiohttp session during shutdown: {e}")
+
+        logging.info("DownloadManager shutdown complete")
     
     def get_downloads(self) -> Dict[int, DownloadMetadata]:
         return self._downloads
@@ -180,6 +198,9 @@ class DownloadManager:
         Returns:
             int: unique task id
         """
+        if n_workers == 0:
+            logging.warning("[add_download] Received n_workers=0, defaulting to None")
+            n_workers = None
 
         task_id = self._iterate_and_get_id()
 
@@ -235,9 +256,11 @@ class DownloadManager:
             return False
 
         if download.state == DownloadState.ERROR:
+            # TODO maybe not 
             if os.path.exists(download.output_file):
                 os.remove(download.output_file)
 
+        download.state = DownloadState.STARTING
         try:
             await self._check_download_headers(download)                
         except Exception as err:
@@ -256,13 +279,19 @@ class DownloadManager:
             if not download.server_supports_http_range or download.file_size_bytes is None or use_parallel_download is False:
                 download.use_parallel_download = False
 
-        # Initialize async downloads
-        if download.use_parallel_download:
-            if download.parallel_metadata is None:
-                download.parallel_metadata = ParallelDownloadMetadata()
-            await self._run_parallel_connection_download(download) 
-        else:
-            await self._run_single_connection_download(download)
+        try:
+            # Initialize async downloads
+            if download.use_parallel_download:
+                if download.parallel_metadata is None:
+                    download.parallel_metadata = ParallelDownloadMetadata()
+                await self._run_parallel_connection_download(download) 
+            else:
+                await self._run_single_connection_download(download)
+        except Exception as err:
+            tb = traceback.format_exc()
+            logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+            return False
         return True
 
     async def _run_parallel_connection_download(self, download: DownloadMetadata):
@@ -355,8 +384,9 @@ class DownloadManager:
                 state=download.state,
                 output_file=download.output_file
             ))
-            return False
+            return
         self._tasks[download.task_id] = asyncio.create_task(self._download_file_coroutine(download))
+        return
 
     async def pause_download(self, task_id: int) -> bool:
         """
@@ -523,7 +553,7 @@ class DownloadManager:
                 download.server_supports_http_range = resp.headers["Accept-Ranges"].lower() == "bytes"
             
             if download.output_file == "":
-                download.output_file = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
+                download.output_file = datetime.now().strftime("%m_%d_%Y_%H_%M_%S") + "_" + uuid.uuid4().hex
                 if "Content-Type" in resp.headers:
                     guess_file_extension = guess_extension(resp.headers["Content-Type"])
                     if guess_file_extension is None:

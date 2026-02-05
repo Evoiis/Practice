@@ -151,3 +151,15 @@ async def test_invalid_test_id(async_thread_runner):
 
     future = async_thread_runner.submit(dm.shutdown())
     future.result(timeout=15)
+
+@pytest.mark.asyncio
+async def test_add_download_zero_workers_input():
+    dm = DownloadManager()
+    mock_url = "https://example.com/file.txt"
+    mock_file_name = "test_file.txt"
+    
+    task_id = dm.add_download(mock_url, mock_file_name, n_workers=0)
+    
+    download_metadata = dm.get_downloads()[task_id]
+    assert download_metadata.parallel_metadata is None
+
