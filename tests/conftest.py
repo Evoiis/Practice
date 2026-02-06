@@ -70,8 +70,9 @@ class MockParallelResponse():
         self.content = self
         self.request_queue = request_queue
         self.data = copy.deepcopy(data)
-        self.send_next_letter: Dict[str, int] = {x:0 for x in range_ends}
+        self.send_n_letters: Dict[str, int] = {x:0 for x in range_ends}
         self.done = {x: False for x in range_ends}
+        self.exception = None
 
     async def __aenter__(self):
         return self
@@ -85,25 +86,30 @@ class MockParallelResponse():
         data_range_request = await self.request_queue.get()
         range_end = data_range_request.split("-")[-1]
 
-        while True:
-            if range_end not in self.send_next_letter:
+        while True:            
+            if self.exception is not None:
+                raise self.exception
+
+            if range_end not in self.send_n_letters:
                 raise Exception(f"Got unexpected {range_end=}")
-            if self.send_next_letter[range_end] > 0:
+            
+
+            if self.send_n_letters[range_end] > 0:
                 if len(self.data[range_end]) > 0:
-                    slice_size = min(1024*256, len(self.data[range_end]))
+                    slice_size = min(1024, self.send_n_letters[range_end])
                     yield bytes(self.data[range_end][:slice_size])
                     self.data[range_end] = self.data[range_end][slice_size:]
-                    self.send_next_letter[range_end] -= slice_size
+                    self.send_n_letters[range_end] -= slice_size
                 else:
                     # No more data to send
                     break
             else:
                 await asyncio.sleep(1)
-            if self.done[range_end] and self.send_next_letter[range_end] == 0:
+            if self.done[range_end] and self.send_n_letters[range_end] == 0:
                 break
     
     def set_range_end_n_send(self, range_end, n):
-        self.send_next_letter[range_end] = n
+        self.send_n_letters[range_end] = n
     
     def set_range_end_done(self, range_end):
         self.done[range_end] = True
@@ -111,6 +117,8 @@ class MockParallelResponse():
     def end_response(self):
         self.stop = True
 
+    def set_exception(self, exception:Exception):
+        self.exception = exception
 
 class MockParallelSession:
     def __init__(self, responses, request_queues):

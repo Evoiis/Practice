@@ -52,7 +52,7 @@ async def test_n_worker_parallel_download_coroutine(async_thread_runner, create_
     
     await wait_for_state(dm, task_id, DownloadState.ALLOCATING_SPACE)
 
-    for _ in range(n_workers):
+    for _ in range(n_workers + 1):
         await wait_for_state(dm, task_id, DownloadState.COMPLETED, 120)
 
     verify_file(
@@ -106,7 +106,7 @@ async def test_parallel_download_pause(async_thread_runner, create_parallel_mock
 
     async_thread_runner.submit(dm.pause_download(task_id)) 
 
-    for _ in range(n_workers):
+    for _ in range(n_workers + 1):
         await wait_for_state(dm, task_id, DownloadState.PAUSED)
     
     future = async_thread_runner.submit(dm.shutdown())

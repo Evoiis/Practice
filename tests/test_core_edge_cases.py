@@ -156,7 +156,7 @@ async def test_download_network_timeout(monkeypatch, async_thread_runner, test_f
 
     monkeypatch.setattr("aiohttp.ClientSession", lambda: MockTimeoutSession())
 
-    dm = DownloadManager(request_timeout=1)
+    dm = DownloadManager()
     task_id = dm.add_download(mock_url, mock_file_name)
     future = async_thread_runner.submit(dm.start_download(task_id))
     
