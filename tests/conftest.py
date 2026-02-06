@@ -15,6 +15,7 @@ class MockResponse:
         self.content = self
         self.queue = asyncio.Queue()
         self.stop = False
+        self.exception = None
 
     async def __aenter__(self):
         return self
@@ -24,6 +25,9 @@ class MockResponse:
 
     async def iter_chunked(self, chunk_size_limit):
         while not self.stop or not self.queue.empty():
+            if self.exception is not None:
+                raise self.exception
+
             if not self.queue.empty():
                 chunk = await self.queue.get()
                 yield chunk
@@ -39,6 +43,9 @@ class MockResponse:
     async def empty_queue(self):
         while not self.queue.empty():
             await self.queue.get()
+
+    def set_exception(self, exception:Exception):
+        self.exception = exception
 
 
 class MockSession:

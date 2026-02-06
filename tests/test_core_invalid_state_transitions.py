@@ -340,8 +340,7 @@ async def test_pause_in_error_state(async_thread_runner, create_mock_response_an
     logging.debug("Download is now in error state, now running pause_download")
 
     future = async_thread_runner.submit(dm.pause_download(task_id))
-    assert future.result(timeout=15) is False, "pause_download should have returned False"
+    assert future.result(timeout=15) is True, "pause_download should have returned True on pausing a task in error"
 
     future = async_thread_runner.submit(dm.shutdown())
     future.result(timeout=15)
-

@@ -292,7 +292,7 @@ async def test_state_consistency_during_error(async_thread_runner, create_mock_r
         mock_url
     )
 
-    dm = DownloadManager()
+    dm = DownloadManager(continue_on_error=False)
     task_id = dm.add_download(mock_url, mock_file_name)
     async_thread_runner.submit(dm.start_download(task_id))
 

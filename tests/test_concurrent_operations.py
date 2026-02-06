@@ -466,7 +466,8 @@ async def test_rapid_delete_and_read(async_thread_runner, create_mock_response_a
 
     dm = DownloadManager()
     
-    for _ in range(5):
+    for i in range(5):
+        logging.debug(f"Loop Number: {i}")
         # Add
         task_id = dm.add_download(mock_url, mock_file_name)
         

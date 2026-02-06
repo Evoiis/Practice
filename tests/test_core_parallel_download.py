@@ -157,7 +157,6 @@ async def test_parallel_download_resume(async_thread_runner, create_parallel_moc
     for _ in range(n_workers):
         await wait_for_state(dm, task_id, DownloadState.PAUSED)
 
-    
     async_thread_runner.submit(dm.start_download(task_id, use_parallel_download=True))
 
     for key in data:

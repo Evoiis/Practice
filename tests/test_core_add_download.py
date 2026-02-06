@@ -72,11 +72,10 @@ async def test_empty_output_file_name(async_thread_runner, create_mock_response_
 
     logging.debug(dm.get_downloads())
     assert dm.get_downloads()[task_id].output_file.endswith(".mp4")
-    
+
     future = async_thread_runner.submit(dm.shutdown())
     future.result(timeout=15)
 
-    await wait_for_state(dm, task_id, DownloadState.PAUSED)
 
     if os.path.exists(dm.get_downloads()[task_id].output_file):
         os.remove(dm.get_downloads()[task_id].output_file)

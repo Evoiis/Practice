@@ -29,6 +29,8 @@ Use `--log-cli-level=INFO` option to mute debug log messages
 - Auto-shutdown/Keep-on Computer Logic
 - Download Speed limiter
 - Save metadata to file: Persist preferences and download_metadata between restarts
-- GUI Elements to edit preferences
-    - Let user override number of parallel workers
-    - Support default download folder
+
+- Separate ERROR from state
+    - State should explain what the manager is doing with a certain download task
+    - Errors should be kept separate
+        - Especially now that errors can continue or pause a download depending on parameters...
