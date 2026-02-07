@@ -1,0 +1,1072 @@
+from enum import Enum
+from dataclasses import dataclass
+from typing import Dict, Optional, Any
+from mimetypes import guess_extension
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+import queue
+import re
+import logging
+import os
+import asyncio
+import aiohttp
+import aiofiles
+import traceback
+import time
+import uuid
+from urllib.parse import urlparse
+
+from .constants import ONE_GIBIBYTE, CHUNK_SIZE, SEGMENT_SIZE, PREALLOCATE_CHUNK_SIZE
+from .speedcalculator import SpeedCalculator
+from .exceptions import UnexpectedStatusException
+
+class DownloadState(Enum):
+    PAUSED = 0
+    RUNNING = 1
+    COMPLETED = 2
+    PENDING = 3
+    DELETED = 4
+    ALLOCATING_SPACE = 5
+    ERROR = 6
+
+
+@dataclass
+class DownloadEvent:
+    task_id: int
+    state: DownloadState
+    output_file: str
+    time: datetime = None
+    error_string: Optional[str] = ""
+    download_speed: float = None
+    active_time: timedelta = None
+    downloaded_bytes: int = None
+    download_size_bytes: int = None
+    worker_id: int = None
+
+
+    def __post_init__(self):
+        self.time = datetime.now()
+
+@dataclass
+class ParallelDownloadMetadata:
+    download_state_lock: asyncio.Lock = None
+
+    worker_states: Optional[dict[int, DownloadState]] = None
+    worker_state_lock: asyncio.Lock = None
+    n_workers: int | None = None
+    
+    iterator_lock: asyncio.Lock = None
+    iterator_empty: bool = False
+    leftover_segments: queue.Queue = None
+    segment_iterator: Optional[range] = None
+    increment: int = SEGMENT_SIZE
+
+    error_data_lock: asyncio.Lock = None    
+    errored_segments: defaultdict[int, int] = None
+    
+
+    def __post_init__(self):
+        self.worker_state_lock = asyncio.Lock()
+        self.iterator_lock = asyncio.Lock()
+        self.download_state_lock = asyncio.Lock()
+        self.error_data_lock = asyncio.Lock()
+
+        self.leftover_segments = queue.Queue()
+
+        self.errored_segments = defaultdict(int)
+        
+
+@dataclass
+class DownloadMetadata:
+    task_id: int
+    url: str
+    output_file: str
+    etag: str = None
+    downloaded_bytes: int = 0
+    file_size_bytes: int = None
+    active_time: timedelta = timedelta()
+    state: DownloadState = DownloadState.PENDING
+    server_supports_http_range: bool = False
+    use_parallel_download: bool = None
+    parallel_metadata: ParallelDownloadMetadata = None
+
+    errors: list = None
+    error_count: int = 0
+
+    def __post_init__(self):
+        self.errors = []
+
+
+class DownloadManager:
+    """
+    Async download manager using asyncio and aiohttp.
+    """
+
+    def __init__(
+            self, 
+            running_event_update_rate_seconds: int = 1, 
+            parallel_running_event_update_rate_seconds: int = 1, 
+            maximum_workers_per_task: int = 5, 
+            request_connect_timeout: float= 120.,
+            request_read_timeout: float= 60.,
+            request_total_timeout: float = None,
+            parallel_download_segment_size: int= SEGMENT_SIZE,
+            continue_on_error: bool= True,
+            stop_continue_on_n_errors: int | None=5,
+            log_tracebacks: bool = False
+        ) -> None:
+        """
+            Initialize the DownloadManager.
+
+            Args:
+                running_event_update_rate_seconds (int):
+                    Progress event interval for single downloads.
+
+                parallel_running_event_update_rate_seconds (int):
+                    Progress event interval per worker for parallel downloads.
+
+                maximum_workers_per_task (int):
+                    Maximum parallel workers per download. Must be >= 1.
+
+                request_connect_timeout (float):
+                    Timeout for establishing a connection.
+
+                request_read_timeout (float):
+                    Timeout for receiving data.
+
+                request_total_timeout (float | None):
+                    Maximum total request duration. None disables total timeout.
+
+                parallel_download_segment_size (int):
+                    Size in bytes of each parallel download segment.
+
+            Notes:
+                aiohttp session is created lazily.
+        """
+
+        if maximum_workers_per_task < 1:
+            raise Exception("Download Manager parameter, maximum_workers_per_task, must be an integer greater than zero")
+
+        self._downloads: Dict[int, DownloadMetadata] = {}
+        self._next_id = 0
+        self.events_queue: queue.Queue[DownloadEvent] = queue.Queue(maxsize=1000)
+        self._tasks: Dict[int, asyncio.Task[Any]] = {}
+        self._task_pools: Dict[int, list] = {}
+        self._preallocate_tasks: Dict[int, asyncio.Task[Any]] = {}
+        self._extra_tasks: list = []
+        self._session: aiohttp.ClientSession = None
+        self._extra_tasks_lock = asyncio.Lock()
+        self._log_tracebacks = log_tracebacks
+
+        self._running_event_update_rate_seconds = running_event_update_rate_seconds
+        self._parallel_running_event_update_rate_seconds = parallel_running_event_update_rate_seconds
+        self._maximum_workers_per_task = maximum_workers_per_task
+        self._request_timeout = aiohttp.ClientTimeout(
+            connect=request_connect_timeout,
+            sock_read=request_read_timeout,
+            total=request_total_timeout
+        )
+        self._parallel_download_segment_size = parallel_download_segment_size
+        self._continue_on_error = continue_on_error
+        self._stop_continue_on_n_errors = stop_continue_on_n_errors
+
+    def _iterate_and_get_id(self) -> int:
+        self._next_id += 1
+        return self._next_id
+
+    def _add_event_to_queue(self, event: DownloadEvent):
+        if self.events_queue.full():
+            logging.error(f"Events queue is FULL! Make sure the gui is absorbing events or reduce event update rates!\nRemoving the first 250 items.")
+            for _ in range(250):
+                self.events_queue.get_nowait()
+        self.events_queue.put_nowait(event)
+        
+    
+    async def _log_and_share_error_event(self, download: DownloadMetadata, err: Exception):
+        """
+        Log error and emit ERROR Download Event.
+        """
+        logging.error(f"{repr(err)}, {err}")
+        download.state = DownloadState.ERROR
+        self._add_event_to_queue(DownloadEvent(
+            task_id=download.task_id,
+            state= download.state,
+            error_string=f"{repr(err)}, {err}",
+            output_file=download.output_file
+        ))
+    
+    def set_continue_on_error(self, setting: bool):
+        self._continue_on_error = setting
+    
+    async def shutdown(self):
+        logging.info("Download Manager initializing shutdown.")
+        all_tasks = []
+        all_tasks.extend(self._tasks.values())
+        all_tasks.extend(self._preallocate_tasks.values())
+
+        for pool in self._task_pools.values():
+            all_tasks.extend(pool)
+
+
+        if not all_tasks:
+            logging.debug("shutdown: no tasks to cancel")
+        else:
+            logging.info(f"shutdown: cancelling {len(all_tasks)} tasks...")
+
+            # Cancel them all at once
+            for task in all_tasks:
+                if not task.done():
+                    task.cancel()
+                    try: 
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+
+            for res in results:
+                if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
+                    logging.error(f"Task raised during shutdown: {res}", exc_info=True)
+            
+            self._tasks.clear()
+            self._task_pools.clear()
+            self._preallocate_tasks.clear()
+
+            async with self._extra_tasks_lock:
+                for task in self._extra_tasks:
+                    if not task.done():
+                        task.cancel()
+                    try: 
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                results = await asyncio.gather(*self._extra_tasks, return_exceptions=True)
+
+                for res in results:
+                    if isinstance(res, Exception) and not isinstance(res, asyncio.CancelledError):
+                        logging.error(f"Task raised during shutdown: {res}", exc_info=True)
+            self._extra_tasks = []
+
+        # Now close the session
+        if self._session is not None and not self._session.closed:
+            try:
+                await self._session.close()
+                # Very small grace period helps avoid ResourceWarning on SSL
+                await asyncio.sleep(1)
+            except Exception as e:
+                logging.warning(f"Error closing aiohttp session during shutdown: {e}")
+
+        await asyncio.sleep(0.1)
+        logging.info("DownloadManager shutdown complete")
+    
+    def get_downloads(self) -> Dict[int, DownloadMetadata]:
+        return self._downloads
+
+    async def get_oldest_event(self) -> Optional[DownloadEvent]:
+        """
+        Retrieve and remove the oldest event from the event queue.
+        If the queue is empty, this method returns None.
+        """
+        if self.events_queue.empty():
+            return None
+        else:
+            return self.events_queue.get_nowait()            
+
+    def add_download(self, url: str, output_file: Optional[str] = "", n_workers: Optional[int] =None) -> int | None:
+        """
+        Register a new download task.
+        NOT threadsafe, only call this from one thread.
+
+        - Generates a unique task ID
+        - Sanitizes and validates the output file name
+        - Creates initial DownloadMetadata in PENDING state
+
+        Returns:
+            int: unique task id
+        """
+        if n_workers is not None and n_workers <= 0:
+            logging.warning("[add_download] Received n_workers=0, defaulting to None")
+            n_workers = None
+
+        # Validate url
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or parsed.netloc == "":
+            logging.warning(f"[add_download] Received invalid url: {url}")
+            return None
+        hostname = parsed.netloc.split(':')[0]
+    
+        # Reject spaces, invalid chars, consecutive dots, etc.
+        if ' ' in hostname or '..' in hostname:
+            logging.warning(f"[add_download] Received invalid url: {url}")
+            return None
+        if not re.match(r'^[a-zA-Z0-9.-]+$', hostname):
+            logging.warning(f"[add_download] Received invalid url: {url}")
+            return None
+        if hostname.startswith(('.', '-')) or hostname.endswith(('.', '-')):
+            logging.warning(f"[add_download] Received invalid url: {url}")
+            return None
+
+        # Validate output_file name
+        for download in self._downloads.values():
+            if download.output_file == output_file:
+                output_file = ""
+                break
+
+        if os.path.exists(output_file):
+            output_file = ""
+
+        # Sanitize filename
+        if output_file:
+            output_file = re.sub(r'[\x00-\x1f\\/:*?"<>|]', "", output_file).rstrip(" .")
+            # Windows reserved names check
+            RESERVED = {'CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4',
+                        'LPT1', 'LPT2', 'LPT3'}
+            if output_file.upper().split('.')[0] in RESERVED:
+                logging.warning(f"[add_download] Reserved filename: '{output_file}', will auto-generate")
+                output_file = ""
+
+        # Create download task
+        task_id = self._iterate_and_get_id()
+        if task_id in self._downloads:
+            raise Exception(f"Error: Unexpected id in download manager downloads. {task_id=}, Downloads: {self._downloads}")
+
+        self._downloads[task_id] = DownloadMetadata(task_id=task_id, url=url, output_file=output_file)
+
+        if n_workers is not None:
+            self._downloads[task_id].parallel_metadata = ParallelDownloadMetadata()
+            self._downloads[task_id].parallel_metadata.n_workers = n_workers
+
+        return task_id
+
+    async def start_download(self, task_id: int, use_parallel_download: bool = None) -> bool:
+        """
+        Start or restart a download task.
+
+        - Initializes the aiohttp session if needed
+        - Validates task state
+        - Fetches and validates HTTP headers
+        - Decides between single or parallel download mode
+        - Launches the appropriate download coroutine
+
+        Args:
+            task_id (int): ID of the download task.
+            use_parallel_download (Optional[bool]): Force enable/disable parallel downloads.
+
+        Returns:
+            bool: True if the download was started successfully, False otherwise.
+        """
+
+        if task_id not in self._downloads:
+            logging.warning(f"Start Download: {task_id=} not found.")
+            return False
+
+        download = self._downloads[task_id]
+        if download.state not in [DownloadState.PENDING, DownloadState.ERROR, DownloadState.PAUSED]:
+            logging.warning(f"Received invalid request to start, {task_id=}. Task is in invalid state to be started/restarted.")
+            return False
+
+        try:
+            if not self._session:
+                self._session = aiohttp.ClientSession()
+
+            await self._check_download_headers(download)
+
+            # Use parallel download decision
+            if download.use_parallel_download is None:
+                download.use_parallel_download = False
+                if (download.file_size_bytes is not None and download.file_size_bytes > ONE_GIBIBYTE and use_parallel_download is None) or use_parallel_download is True:
+                    download.use_parallel_download = True
+
+                # If the server doesn't have http range support or didn't provide Content-Length then we can't use parallel download
+                if not download.server_supports_http_range or download.file_size_bytes is None or use_parallel_download is False:
+                    download.use_parallel_download = False
+
+            # Initialize async downloads
+            if download.use_parallel_download:
+                if download.parallel_metadata is None:
+                    download.parallel_metadata = ParallelDownloadMetadata()
+                return await self._start_parallel_connection_download(download)
+            else:
+                return await self._start_single_connection_download(download)
+        except Exception as err:
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+            return False
+        return True
+
+    async def _start_parallel_connection_download(self, download: DownloadMetadata):
+        """
+        Start a parallel download using multiple worker tasks.
+
+        - Checks if the file is already complete on disk
+        - Preallocates disk space if required
+        - Creates a pool of worker tasks to download file ranges
+
+        Args:
+            download (DownloadMetadata): The download to process.
+        """
+
+        try:
+            if download.task_id in self._task_pools and len(self._task_pools[download.task_id]) != 0:
+                flag = False
+                for task in self._task_pools[download.task_id]:
+                    if not task.done():
+                        flag = True
+                        break
+                
+                if flag:
+                    logging.info(f"{download.task_id}, Found workers still running for download. Not restarting download.")
+                    return False
+
+            if await self._check_if_complete_file_on_disk(download):
+                if download.parallel_metadata.leftover_segments.empty() and download.parallel_metadata.iterator_empty:
+                    logging.info("Found file in directory and download queues are empty. Marking download as complete.")
+                    download.state = DownloadState.COMPLETED
+                    self._add_event_to_queue(DownloadEvent(
+                        task_id=download.task_id,
+                        state=download.state,
+                        output_file=download.output_file
+                    ))
+                    return False
+            
+            if download.state == DownloadState.ALLOCATING_SPACE:
+                return False
+
+            if not os.path.exists(download.output_file) or (os.path.exists(download.output_file) and os.path.getsize(download.output_file) != download.file_size_bytes):
+                self._preallocate_tasks[download.task_id] = asyncio.create_task(self._preallocate_file_space_on_disk(download))
+                await self._preallocate_tasks[download.task_id]
+
+                if download.task_id in self._preallocate_tasks:
+                    del self._preallocate_tasks[download.task_id]
+
+            await self._create_task_pool(download)
+            return True
+        except asyncio.CancelledError:
+            logging.debug(f"{download.task_id=} paused during pre-allocating phase.")
+            download.state = DownloadState.PAUSED
+            self._add_event_to_queue(DownloadEvent(
+                task_id=download.task_id,
+                state= download.state,
+                output_file=download.output_file
+            ))
+            raise
+        except Exception as err:
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+            return False
+
+    async def _preallocate_file_space_on_disk(self, download: DownloadMetadata):
+        """
+        Preallocate disk space for a download file.
+
+        - writes zero bytes to disk to ensure the full file size is allocated before parallel downloads begin
+        """
+
+        download.state = DownloadState.ALLOCATING_SPACE
+        self._add_event_to_queue(DownloadEvent(
+            task_id=download.task_id,
+            state=download.state,
+            output_file=None
+        ))
+
+        file_size_on_disk = 0
+        if os.path.exists(download.output_file):
+            file_size_on_disk = os.path.getsize(download.output_file)
+            logging.debug(f"Found partially allocated file, resume from {file_size_on_disk=}")
+        next_write_byte = file_size_on_disk
+
+        async with aiofiles.open(download.output_file, "ab") as f:
+            while next_write_byte < download.file_size_bytes:
+                chunk_size = min(PREALLOCATE_CHUNK_SIZE, download.file_size_bytes - next_write_byte)
+                await f.write(b"\x00" * chunk_size)
+                next_write_byte += chunk_size
+
+
+    async def _start_single_connection_download(self, download:DownloadMetadata):
+        """
+        Start a single-connection download.
+
+        This method:
+        - Resumes from existing file size if present
+        - Checks if the file is already complete
+        - Launches a single download coroutine
+        """
+
+        download.downloaded_bytes = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
+        if await self._check_if_complete_file_on_disk(download):
+            download.state = DownloadState.COMPLETED
+            self._add_event_to_queue(DownloadEvent(
+                task_id=download.task_id,
+                state=download.state,
+                output_file=download.output_file
+            ))
+            return False
+
+        if download.task_id in self._tasks and not self._tasks[download.task_id].done():
+            logging.info(f"{download.task_id=}, not starting a new async task, found one still running for this download.")
+            return False
+
+        self._tasks[download.task_id] = asyncio.create_task(self._download_file_coroutine(download))
+        return True
+
+    async def pause_download(self, task_id: int) -> bool:
+        """
+        Pause an active download or preallocation task.
+
+        - Cancels active tasks or worker pools
+        - Updates download state to PAUSED and emits Paused DownloadState
+        """
+        if task_id not in self._downloads:
+            logging.warning(f"Pause download called with invalid {task_id=}")
+            return False
+        download = self._downloads[task_id]
+
+        try:
+            if download.state == DownloadState.ALLOCATING_SPACE:
+                if task_id in self._preallocate_tasks:
+                    task = self._preallocate_tasks[task_id]
+                    if not task.done():
+                        task.cancel()
+                        try: 
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    if task_id in self._preallocate_tasks:
+                        del self._preallocate_tasks[task_id]
+                    return True
+                else:
+                    return False
+
+            if download.state not in [DownloadState.RUNNING, DownloadState.ERROR]:
+                logging.warning("[pause_download] called on non-running task")
+                return False
+
+            if download.use_parallel_download:
+                if task_id not in self._task_pools:
+                    return False
+                task_pool = self._task_pools[task_id]
+                for task in task_pool:
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                if download.task_id in self._task_pools:
+                    del self._task_pools[download.task_id]
+            else:
+                if task_id not in self._tasks:
+                    raise Exception("Error: [pause_download], task_id not in DownloadManager task list")
+                task = self._tasks[task_id]
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                
+                if task_id in self._tasks:
+                    del self._tasks[task_id]
+
+            download.state = DownloadState.PAUSED
+            self._add_event_to_queue(
+                DownloadEvent(
+                    task_id=task_id,
+                    state=download.state,
+                    output_file=download.output_file,
+                )
+            )
+            return True
+        except Exception as err:
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+            raise
+
+    async def delete_download(self, task_id: int, remove_file: bool = False) -> bool:
+        """
+        Delete a download task and optionally remove its file.
+
+        This method:
+        - Pauses the download if running
+        - Removes all internal task references
+        - Emits a DELETED event
+
+        Args:
+            task_id (int): ID of the download to delete.
+            remove_file (bool): Whether to delete the downloaded file.
+
+        Returns:
+            bool: True if deletion was successful, False otherwise.
+        """
+
+        try:
+            if task_id not in self._downloads:
+                logging.warning(f"[delete_download] called with invalid {task_id=}")
+                return False
+
+            download = self._downloads[task_id]
+            if self._downloads[task_id].state == DownloadState.RUNNING:
+                if not await self.pause_download(task_id):
+                    logging.warning("[delete_download]: pause_download returned false")
+            
+            if task_id in self._tasks:
+                del self._tasks[task_id]
+
+            if task_id in self._task_pools:
+                del self._task_pools[task_id]
+            
+            if remove_file and os.path.exists(self._downloads[task_id].output_file):
+                try:
+                    os.remove(self._downloads[task_id].output_file)
+                except PermissionError:
+                    await asyncio.sleep(1)
+                    os.remove(self._downloads[task_id].output_file)
+            
+            self._add_event_to_queue(
+                DownloadEvent(
+                    task_id=task_id,
+                    state=DownloadState.DELETED,
+                    output_file=None
+                )
+            )            
+        except Exception as err:
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
+            await self._log_and_share_error_event(download, err)
+            return False
+        
+        if task_id in self._downloads:
+            del self._downloads[task_id]
+
+        return True
+
+
+    async def _check_download_headers(self, download: DownloadMetadata):
+        """
+        Fetch and validate HTTP headers for a download.
+
+        This method:
+        - Retrieves ETag, Content-Length, Accept-Ranges, Content-Type
+        - Detects server-side changes to file size or ETag
+        - Resets local file state if changes are detected
+        - Generates an output filename if none is provided
+        """
+
+        async with self._session.head(download.url, timeout=self._request_timeout) as resp:
+            if resp.status >= 300 or resp.status < 200:
+                raise Exception(f"Error: Header request received invalid response status: {resp.status}.")
+
+            if "ETag" in resp.headers:
+                etag = resp.headers["ETag"].strip('"')
+                if download.etag is None:
+                    download.etag = etag
+                elif etag != download.etag:
+                    logging.debug(f"Etag changed for {download.task_id=}, {download.url=}, {download.output_file=}. Restarting download from scratch.")
+                    download.etag = etag
+                    if os.path.exists(download.output_file):
+                        os.remove(download.output_file)
+                        download.downloaded_bytes = 0
+
+            if "Content-Length" in resp.headers:
+                if download.file_size_bytes is None:
+                    download.file_size_bytes = int(resp.headers["Content-Length"])
+                elif download.file_size_bytes != int(resp.headers["Content-Length"]):
+                    logging.debug(f"File size changed for {download.task_id=}, {download.url=}, {download.output_file=}. Restarting download from scratch.")
+                    download.file_size_bytes = int(resp.headers["Content-Length"])
+                    if os.path.exists(download.output_file):
+                        os.remove(download.output_file)
+                        download.downloaded_bytes = 0
+
+            if "Accept-Ranges" in resp.headers:
+                download.server_supports_http_range = resp.headers["Accept-Ranges"].lower() == "bytes"
+            
+            if download.output_file == "":
+                download.output_file = datetime.now().strftime("%m_%d_%Y_%H_%M_%S") + "_" + uuid.uuid4().hex
+                if "Content-Type" in resp.headers:
+                    guess_file_extension = guess_extension(resp.headers["Content-Type"])
+                    if guess_file_extension is None:
+                        download.output_file += ".file"
+                    else:
+                        download.output_file += guess_file_extension
+                else:
+                    download.output_file += ".file"
+    
+    async def _check_if_complete_file_on_disk(self, download: DownloadMetadata):
+        """
+        Check whether the downloaded file is already complete.
+
+        - Compares file size on disk to expected Content-Length
+        - Emits an error if an oversized file exists
+
+        Returns:
+            bool: True if the file is complete, False otherwise.
+
+        Raises:
+            Exception: If an oversized conflicting file exists.
+        """
+
+        if download.file_size_bytes is None:
+            logging.warning(f"{download=} does not have file_size_bytes, so the program cannot evaluate if the complete file is on disk.")
+            return False
+
+        output_file_size = os.path.getsize(download.output_file) if os.path.exists(download.output_file) else 0
+        if output_file_size != 0:
+            if output_file_size == download.file_size_bytes:
+                return True
+            elif output_file_size > download.file_size_bytes:
+                download.state = DownloadState.ERROR
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state= download.state,
+                    error_string="There is already a downloaded file with the same name with a greater size!",
+                    output_file=download.output_file
+                ))
+                raise Exception("Existing file blocking output file.")
+        
+        return False
+
+    
+    async def _create_task_pool(self, download: DownloadMetadata): 
+        """
+        Create worker tasks for parallel downloads.
+
+        This method:
+        - Splits the file into byte ranges
+        - Enqueues ranges into a shared queue
+        - Spawns worker tasks to process the ranges
+
+        Args:
+            download (DownloadMetadata): The download to parallelize.
+        """
+
+        logging.debug(f"Creating task pool for {download.task_id=}, {download}")
+
+        task_id = download.task_id
+        self._task_pools[task_id] = []
+        download.parallel_metadata.worker_states = dict()
+
+        if download.parallel_metadata.segment_iterator is None:
+            if download.file_size_bytes is None or download.file_size_bytes == 0:
+                raise Exception("Parallel download requires Content-Length header")
+
+            download.parallel_metadata.increment = self._parallel_download_segment_size
+            download.parallel_metadata.segment_iterator = iter(range(0, download.file_size_bytes, download.parallel_metadata.increment))
+
+        if download.parallel_metadata.n_workers is None:
+            download.parallel_metadata.n_workers = self._maximum_workers_per_task
+
+        for n in range(download.parallel_metadata.n_workers):
+            download.parallel_metadata.worker_states[n] = DownloadState.PENDING
+            self._task_pools[task_id].append(
+                asyncio.create_task(self._parallel_download_coroutine(
+                    download,
+                    n
+                ))
+            )
+
+    async def _parallel_download_coroutine(self, download: DownloadMetadata, worker_id) -> None:
+        """
+        Worker coroutine for parallel downloads.
+
+        - Fetches byte ranges from a shared queue
+        - Downloads and writes file chunks
+        - Reports progress events
+        - Handles cancellation and error recovery
+
+        Args:
+            download (DownloadMetadata): The associated download.
+            worker_id (int): Worker identifier.
+        """
+
+        logging.debug(f"Task {download.task_id}, Worker {worker_id} initialized.")
+        next_write_byte = 0
+        end_bytes = 0
+        active_time = timedelta()
+
+        speed_calc = SpeedCalculator()
+        while True:
+            try:
+                try:
+                    start_bytes, end_bytes = download.parallel_metadata.leftover_segments.get_nowait()
+                except queue.Empty:
+                    async with download.parallel_metadata.iterator_lock:
+                        start_bytes = next(download.parallel_metadata.segment_iterator)
+                        end_bytes = min(start_bytes + download.parallel_metadata.increment - 1, download.file_size_bytes)
+
+                logging.debug(f"Task {download.task_id}, Worker {worker_id} picked up download segment: ({start_bytes}, {end_bytes})")
+                next_write_byte = start_bytes
+
+                headers = {
+                    "Range": f"bytes={start_bytes}-{end_bytes}"
+                }
+
+                last_running_update = time.monotonic() - self._parallel_running_event_update_rate_seconds
+                last_active_time_update = time.monotonic()
+
+                async with aiofiles.open(download.output_file, "r+b") as f:
+                    async with self._session.get(download.url, headers=headers, timeout=self._request_timeout) as resp:
+                        async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                            if resp.status != 206:
+                                raise UnexpectedStatusException(
+                                    status=resp.status, 
+                                    task_id=download.task_id,
+                                    worker_id=worker_id,
+                                    expected=(206), 
+                                    url=download.url,
+                                    message="[Parallel Coroutine]"
+                                )
+                            await f.seek(next_write_byte)
+                            await f.write(chunk)
+
+                            next_write_byte += len(chunk)
+
+                            async with download.parallel_metadata.worker_state_lock:
+                                download.downloaded_bytes += len(chunk)
+                            
+                            speed_calc.add_bytes(len(chunk))
+
+                            now = time.monotonic()
+                            active_time += timedelta(seconds=now - last_active_time_update)
+                            last_active_time_update = now
+
+                            if (time.monotonic() - last_running_update) > self._parallel_running_event_update_rate_seconds:
+                                last_running_update = time.monotonic()
+
+                                async with download.parallel_metadata.download_state_lock:
+                                    download.state = DownloadState.RUNNING
+                                async with download.parallel_metadata.worker_state_lock:
+                                    download.parallel_metadata.worker_states[worker_id] = DownloadState.RUNNING
+
+                                download_speed = speed_calc.get_speed()
+
+                                self._add_event_to_queue(DownloadEvent(
+                                    task_id=download.task_id,
+                                    state=DownloadState.RUNNING,
+                                    output_file=download.output_file,
+                                    download_speed=download_speed,
+                                    active_time=active_time,
+                                    downloaded_bytes=download.downloaded_bytes,
+                                    download_size_bytes=download.file_size_bytes,
+                                    worker_id=worker_id
+                                ))            
+            except asyncio.CancelledError:
+                if next_write_byte != end_bytes:
+                    download.parallel_metadata.leftover_segments.put_nowait((next_write_byte, end_bytes))
+
+                # flag = True
+                async with download.parallel_metadata.worker_state_lock:
+                    download.parallel_metadata.worker_states[worker_id] = DownloadState.PAUSED
+                #     for worker in download.parallel_metadata.worker_states:
+                #         if download.parallel_metadata.worker_states[worker] not in [DownloadState.PAUSED, DownloadState.COMPLETED]:
+                #             flag = False
+                #             break
+
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.parallel_metadata.worker_states[worker_id],
+                    output_file=download.output_file,
+                    worker_id=worker_id,
+                    active_time=active_time
+                ))
+                
+                # if flag:
+                #     async with download.parallel_metadata.download_state_lock:
+                #         download.state = DownloadState.PAUSED
+                #         self._add_event_to_queue(DownloadEvent(
+                #             task_id=download.task_id,
+                #             state=download.state,
+                #             output_file=download.output_file,
+                #         ))
+                raise
+            except StopIteration:
+                logging.debug(f"Download {download.task_id}, Worker {worker_id}, found no tasks, worker complete.")
+                download.parallel_metadata.iterator_empty = True
+                
+                flag = True
+                async with download.parallel_metadata.worker_state_lock:
+                    download.parallel_metadata.worker_states[worker_id] = DownloadState.COMPLETED
+                    for worker in download.parallel_metadata.worker_states:
+                        if download.parallel_metadata.worker_states[worker] != DownloadState.COMPLETED:
+                            flag = False
+                            break
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.parallel_metadata.worker_states[worker_id],
+                    output_file=download.output_file,
+                    download_speed=0,
+                    active_time=active_time,
+                    downloaded_bytes=download.downloaded_bytes,
+                    download_size_bytes=download.file_size_bytes,
+                    worker_id=worker_id
+                ))
+
+                if flag:
+                    async with download.parallel_metadata.download_state_lock:
+                        download.state = DownloadState.COMPLETED
+                        self._add_event_to_queue(DownloadEvent(
+                            task_id=download.task_id,
+                            state=download.state,
+                            output_file=download.output_file,
+                        ))
+                return
+            except Exception as err:
+                if next_write_byte != end_bytes:
+                    download.parallel_metadata.leftover_segments.put_nowait((next_write_byte, end_bytes))
+                
+                async with download.parallel_metadata.error_data_lock:
+                    download.parallel_metadata.errored_segments[end_bytes] += 1
+                    download.error_count += 1
+                    download.errors.append(err)
+
+                    logging.error(f"Task: {download.task_id}, Worker {worker_id}, {download.error_count=}, \n\t{download.errors=},\n\t{download.parallel_metadata.errored_segments=}")
+
+                logging.error(f"Task: {download.task_id}, Worker {worker_id}, Error: {repr(err)}, {err}")
+                if self._log_tracebacks:
+                    tb = traceback.format_exc()
+                    logging.error(f"Traceback: {tb}")
+                async with download.parallel_metadata.worker_state_lock:
+                    download.parallel_metadata.worker_states[worker_id] = DownloadState.ERROR
+
+                async with download.parallel_metadata.download_state_lock:
+                    download.state = DownloadState.ERROR
+                    self._add_event_to_queue(DownloadEvent(
+                        task_id=download.task_id,
+                        state= download.state,
+                        error_string=f"{repr(err)}, {err}",
+                        output_file=download.output_file,
+                        worker_id=worker_id,
+                        active_time=active_time
+                    ))
+                
+                # Short wait before going back into the loop
+                if self._continue_on_error:
+                    if self._stop_continue_on_n_errors is not None:
+                        async with download.parallel_metadata.error_data_lock:
+                            if download.error_count >= self._stop_continue_on_n_errors:
+                                async with self._extra_tasks_lock:
+                                    task = asyncio.create_task(self.pause_download(download.task_id))
+                                    self._extra_tasks.append(task)
+                                return
+                    else:
+                        await asyncio.sleep(0.1)
+                else:
+                    async with self._extra_tasks_lock:
+                        task = asyncio.create_task(self.pause_download(download.task_id))
+                        self._extra_tasks.append(task)
+                    return
+
+    async def _download_file_coroutine(self, download: DownloadMetadata) -> None:
+        """
+        Single-connection download coroutine.
+
+        This method:
+        - Performs sequential HTTP downloads
+        - Supports resume via HTTP Range headers
+        - Emits periodic progress events
+        - Handles cancellation and completion events
+
+        Args:
+            download (DownloadMetadata): The download to process.
+        """
+        while True:
+            try:
+                headers = {}
+
+                if download.server_supports_http_range:
+                    headers["Range"] = f"bytes={download.downloaded_bytes}-"
+                
+
+                download.state = DownloadState.RUNNING
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state=download.state,
+                    output_file=download.output_file
+                ))
+
+                last_running_update = time.monotonic() - self._running_event_update_rate_seconds
+                last_active_time_update = time.monotonic()
+                speed_calc = SpeedCalculator()
+
+                mode = "wb"
+                if download.server_supports_http_range:
+                    mode = "ab"
+                async with aiofiles.open(download.output_file, mode) as f:
+                    async with self._session.get(download.url, headers=headers, timeout=self._request_timeout) as resp:
+                        async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                            expected = (200, 206)
+                            if resp.status not in expected:
+                                raise UnexpectedStatusException(
+                                    status=resp.status, 
+                                    task_id=download.task_id,
+                                    expected=expected, 
+                                    url=download.url,
+                                    message="[Single Download Coroutine]"
+                                )
+                            
+                            await f.write(chunk)
+                            download.downloaded_bytes += len(chunk)
+                            speed_calc.add_bytes(len(chunk))
+
+                            now = time.monotonic()
+                            download.active_time += timedelta(seconds=now - last_active_time_update)
+                            last_active_time_update = now
+                            
+                            download_speed = speed_calc.get_speed()
+                            if (time.monotonic() - last_running_update) > self._running_event_update_rate_seconds:
+                                last_running_update = time.monotonic()
+                                download.state = DownloadState.RUNNING
+                                self._add_event_to_queue(DownloadEvent(
+                                    task_id=download.task_id,
+                                    state=download.state,
+                                    output_file=download.output_file,
+                                    download_speed=download_speed,
+                                    active_time=download.active_time,
+                                    downloaded_bytes=download.downloaded_bytes,
+                                    download_size_bytes=download.file_size_bytes
+                                ))
+
+                download.state = DownloadState.COMPLETED
+                self._add_event_to_queue(DownloadEvent(
+                    task_id=download.task_id,
+                    state= download.state,
+                    output_file=download.output_file,
+                    download_speed=0,
+                    active_time=download.active_time,
+                    downloaded_bytes=download.downloaded_bytes,
+                    download_size_bytes=download.file_size_bytes
+                ))
+
+                return
+            except asyncio.CancelledError:
+                # download.state = DownloadState.PAUSED
+                # self._add_event_to_queue(DownloadEvent(
+                #     task_id=download.task_id,
+                #     state= download.state,
+                #     output_file=download.output_file
+                # ))
+                raise
+            except Exception as err:
+                if self._log_tracebacks:
+                    tb = traceback.format_exc()
+                    logging.error(f"Traceback: {tb}")
+                await self._log_and_share_error_event(download, err)
+
+                download.error_count += 1
+                if self._continue_on_error:
+                    if self._stop_continue_on_n_errors is not None and download.error_count >= self._stop_continue_on_n_errors:
+                        raise
+                    else:
+                        await asyncio.sleep(2)
+                else:
+                    return
+
+
+__all__ = ["DownloadManager", "DownloadMetadata", "DownloadState", "DownloadEvent"]

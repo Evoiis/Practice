@@ -19,6 +19,8 @@ class AsyncioEventLoopThread:
 
     def shutdown(self):
         self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join()
+        self.thread.join(30.0)
+        if self.thread.is_alive():
+            raise Exception("Failed to join async thread after timeout!")
 
 __all__ = ["AsyncioEventLoopThread"]

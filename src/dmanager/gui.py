@@ -28,7 +28,7 @@ class DownloadManagerGUI:
         self.task_id_to_table_row = dict()
         self.task_id_and_worker_id_to_table_row = dict()
         self.root = tk.Tk()
-        self.download_data: Dict[int: DownloadMetadata] = dict()
+        self.download_data: Dict[int, DownloadMetadata] = dict()
         self.last_event = None
 
         self._generate_gui_base_elements()
@@ -85,10 +85,21 @@ class DownloadManagerGUI:
 
     def _update_gui_with_event(self, event):
         """Update GUI widgets with event data."""
+
         if event.error_string:
             event.error_string = self._wrap_text(event.error_string, ERROR_COL_WIDTH)
+
+
         if event.state == DownloadState.DELETED:
             self.table.delete(self.task_id_to_table_row[event.task_id])
+            if event.task_id in self.task_id_to_table_row:
+                del self.task_id_to_table_row[event.task_id]
+            
+            for task_id, worker_id in list(self.task_id_and_worker_id_to_table_row.keys()):
+                if task_id == event.task_id:
+                    del self.task_id_and_worker_id_to_table_row[(task_id, worker_id)]
+
+
         elif event.worker_id is not None:
             if (event.task_id, event.worker_id) in self.task_id_and_worker_id_to_table_row:
                 values = list(self.table.item(self.task_id_and_worker_id_to_table_row[(event.task_id, event.worker_id)], "values"))
@@ -153,6 +164,10 @@ class DownloadManagerGUI:
             url,
             file_name
         )
+
+        if not task_id:
+            # TODO Indicate to user URL was invalid.
+            return
 
         self.task_id_to_table_row[task_id] = self.table.insert(
             "",
@@ -259,7 +274,7 @@ class DownloadManagerGUI:
         style = ttk.Style()
         style.configure("Treeview", rowheight=50)
 
-        table_columns = ("Task ID", "Download State", "URL", "Output File", "Downloaded / Total Size (%)", "Current Download Speed", "Error", "Active Time (H:M:S)", "", "", "")
+        table_columns = ("Task ID", "Download State", "URL", "Output File", "Downloaded / Total Size (%)", "Current Download Speed(MiB/s)", "Error", "Active Time (H:M:S)", "", "", "")
         self.table = ttk.Treeview(
             self.root,
             columns=table_columns,

@@ -1,7 +1,7 @@
 from src.dmanager.core import DownloadManager
 from src.dmanager.asyncio_thread import AsyncioEventLoopThread
 from src.dmanager.gui import DownloadManagerGUI
-from concurrent.futures._base import CancelledError
+from concurrent.futures import CancelledError
 
 import logging
 import argparse

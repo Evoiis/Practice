@@ -1,6 +1,6 @@
 import pytest
 import logging
-
+import inspect
 
 from dmanager.core import DownloadManager, DownloadState
 from tests.helpers import wait_for_state, verify_file
@@ -9,7 +9,7 @@ from tests.helpers import wait_for_state, verify_file
 async def test_header_etag_change(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
     chunks = [b"abc", b"def", b"ghi"]
     mock_url = "https://example.com/file.bin"
-    mock_file_name = "test_file.bin"
+    mock_file_name = f"{inspect.currentframe().f_code.co_name}.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
     mock_response = create_mock_response_and_set_mock_session(
@@ -52,14 +52,14 @@ async def test_header_etag_change(async_thread_runner, test_file_setup_and_clean
     verify_file(mock_file_name, "defghi")
 
     future = async_thread_runner.submit(dm.shutdown())
-    future.result()
+    future.result(timeout=15)
 
 
 @pytest.mark.asyncio
 async def test_resume_on_header_content_length_change(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
     chunks = [b"abc", b"def", b"ghi"]
     mock_url = "https://example.com/file.bin"
-    mock_file_name = "test_file.bin"
+    mock_file_name = f"{inspect.currentframe().f_code.co_name}.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
     mock_response = create_mock_response_and_set_mock_session(
@@ -102,12 +102,12 @@ async def test_resume_on_header_content_length_change(async_thread_runner, test_
     verify_file(mock_file_name, "defghi")
 
     future = async_thread_runner.submit(dm.shutdown())
-    future.result()
+    future.result(timeout=15)
 
 @pytest.mark.asyncio
 async def test_download_with_no_http_range_support(async_thread_runner, test_file_setup_and_cleanup, create_mock_response_and_set_mock_session):
     mock_url = "https://example.com/file.bin"
-    mock_file_name = "test_file.bin"
+    mock_file_name = f"{inspect.currentframe().f_code.co_name}.txt"
     test_file_setup_and_cleanup(mock_file_name)
 
     mock_response = create_mock_response_and_set_mock_session(
@@ -134,4 +134,4 @@ async def test_download_with_no_http_range_support(async_thread_runner, test_fil
     verify_file(mock_file_name, "abcdefghi")
 
     future = async_thread_runner.submit(dm.shutdown())
-    future.result()
+    future.result(timeout=15)
