@@ -217,7 +217,13 @@ def test_file_setup_and_cleanup(request):
     def cleanup():
         if test_file_name != "" and os.path.exists(test_file_name):
             logging.debug(f"Cleaning up {test_file_name=}")
-            os.remove(test_file_name)
+            while True:
+                try:
+                    os.remove(test_file_name)
+                    break
+                except PermissionError:
+                    logging.warning("Found PermissionError, sleeping 1 second then trying again.")
+                    time.sleep(1)
             
     
     request.addfinalizer(cleanup)

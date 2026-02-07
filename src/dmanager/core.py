@@ -113,7 +113,8 @@ class DownloadManager:
             request_total_timeout: float = None,
             parallel_download_segment_size: int= SEGMENT_SIZE,
             continue_on_error: bool= True,
-            stop_continue_on_n_errors: int | None=5
+            stop_continue_on_n_errors: int | None=5,
+            log_tracebacks: bool = False
         ) -> None:
         """
             Initialize the DownloadManager.
@@ -156,6 +157,7 @@ class DownloadManager:
         self._extra_tasks: list = []
         self._session: aiohttp.ClientSession = None
         self._extra_tasks_lock = asyncio.Lock()
+        self._log_tracebacks = log_tracebacks
 
         self._running_event_update_rate_seconds = running_event_update_rate_seconds
         self._parallel_running_event_update_rate_seconds = parallel_running_event_update_rate_seconds
@@ -213,9 +215,13 @@ class DownloadManager:
             logging.info(f"shutdown: cancelling {len(all_tasks)} tasks...")
 
             # Cancel them all at once
-            for t in all_tasks:
-                if not t.done():
-                    t.cancel()
+            for task in all_tasks:
+                if not task.done():
+                    task.cancel()
+                    try: 
+                        await task
+                    except asyncio.CancelledError:
+                        pass
 
             results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
@@ -228,9 +234,13 @@ class DownloadManager:
             self._preallocate_tasks.clear()
 
             async with self._extra_tasks_lock:
-                for t in self._extra_tasks:
-                    if not t.done():
-                        t.cancel()
+                for task in self._extra_tasks:
+                    if not task.done():
+                        task.cancel()
+                    try: 
+                        await task
+                    except asyncio.CancelledError:
+                        pass
                 results = await asyncio.gather(*self._extra_tasks, return_exceptions=True)
 
                 for res in results:
@@ -380,8 +390,9 @@ class DownloadManager:
             else:
                 return await self._start_single_connection_download(download)
         except Exception as err:
-            tb = traceback.format_exc()
-            logging.error(f"Traceback: {tb}")
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
             return False
         return True
@@ -443,8 +454,9 @@ class DownloadManager:
             ))
             raise
         except Exception as err:
-            tb = traceback.format_exc()
-            logging.error(f"Traceback: {tb}")
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
             return False
 
@@ -571,8 +583,9 @@ class DownloadManager:
             )
             return True
         except Exception as err:
-            tb = traceback.format_exc()
-            logging.error(f"Traceback: {tb}")
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
             raise
 
@@ -624,8 +637,9 @@ class DownloadManager:
                 )
             )            
         except Exception as err:
-            tb = traceback.format_exc()
-            logging.error(f"Traceback: {tb}")
+            if self._log_tracebacks:
+                tb = traceback.format_exc()
+                logging.error(f"Traceback: {tb}")
             await self._log_and_share_error_event(download, err)
             return False
         
@@ -915,8 +929,9 @@ class DownloadManager:
                     logging.error(f"Task: {download.task_id}, Worker {worker_id}, {download.error_count=}, \n\t{download.errors=},\n\t{download.parallel_metadata.errored_segments=}")
 
                 logging.error(f"Task: {download.task_id}, Worker {worker_id}, Error: {repr(err)}, {err}")
-                tb = traceback.format_exc()
-                logging.error(f"Traceback: {tb}")
+                if self._log_tracebacks:
+                    tb = traceback.format_exc()
+                    logging.error(f"Traceback: {tb}")
                 async with download.parallel_metadata.worker_state_lock:
                     download.parallel_metadata.worker_states[worker_id] = DownloadState.ERROR
 
@@ -1039,8 +1054,9 @@ class DownloadManager:
                 # ))
                 raise
             except Exception as err:
-                tb = traceback.format_exc()
-                logging.error(f"Traceback: {tb}")
+                if self._log_tracebacks:
+                    tb = traceback.format_exc()
+                    logging.error(f"Traceback: {tb}")
                 await self._log_and_share_error_event(download, err)
 
                 download.error_count += 1

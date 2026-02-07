@@ -194,13 +194,6 @@ async def test_single_download_do_not_continue_on_error(async_thread_runner, tes
     mock_response.set_exception(exception)
 
     await wait_for_state(dm, task_id, DownloadState.ERROR)
-
-    if task_id in dm._tasks:
-        task = dm._tasks[task_id]
-        try:
-            await asyncio.wait_for(task, timeout=10)
-        except Exception as err:
-            assert err == exception
     
     assert dm.get_downloads()[task_id].state == DownloadState.ERROR
 

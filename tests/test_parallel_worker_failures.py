@@ -286,7 +286,7 @@ async def test_parallel_worker_pause_after_failure(test_file_setup_and_cleanup, 
 
 
     if continue_on_error:
-        async_thread_runner.submit(dm.pause_download(task_id))
+        async_thread_runner.submit(dm.pause_download(task_id))        
         await wait_for_state(dm, task_id, DownloadState.PAUSED)
     else:
         await wait_for_state(dm, task_id, DownloadState.PAUSED)
